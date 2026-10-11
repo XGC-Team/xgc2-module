@@ -235,6 +235,7 @@ pub struct Env {
     pub clock: Arc<Clock>,
     pub sched: Arc<Scheduler>,
     pub timers: Arc<Timers>,
+    pub readiness_changed: tokio::sync::watch::Sender<()>,
 }
 
 pub struct Instance {
@@ -342,6 +343,7 @@ impl Instance {
 
     fn set_state(&self, state: State) {
         self.state.store(state as u8, Ordering::Release);
+        self.env.readiness_changed.send_replace(());
     }
 
     /// Snapshot of the configuration and timing (control plane only).

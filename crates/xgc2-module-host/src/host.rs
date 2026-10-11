@@ -7,7 +7,7 @@
 //! point.
 
 use crate::channel::{Channel, CommitHook};
-use crate::clock::{Clock, Mode};
+use crate::clock::{Clock, Mode, Update};
 use crate::instance::{lock, Completion, Env, Instance, OpKind, Params, State};
 use crate::loader::{self, Dir, Module};
 use crate::log::Level;
@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 
 #[derive(Debug)]
 pub enum HostError {
@@ -166,6 +167,7 @@ pub(crate) struct Core {
     pub(crate) started: Instant,
     pub(crate) clock: Arc<Clock>,
     pub(crate) sched: Arc<Scheduler>,
+    pub(crate) readiness_changed: watch::Sender<()>,
     timers: Arc<Timers>,
     timer_thread: Mutex<Option<JoinHandle<()>>>,
     topo: RwLock<Topology>,
@@ -211,6 +213,7 @@ impl ModuleHost {
         let clock = Arc::new(Clock::new(options.clock.mode));
         let sched = Scheduler::new(options.workers.max(1));
         let timers = Timers::new(sched.clone(), clock.clone(), MAX_INSTANCES);
+        let (readiness_changed, _) = watch::channel(());
         let mut topology = Topology {
             modules: BTreeMap::new(),
             slots: vec![None; MAX_INSTANCES],
@@ -220,12 +223,15 @@ impl ModuleHost {
         };
         if options.clock.mode == Mode::External {
             let name = options.clock.channel.clone().ok_or_else(|| HostError::Invalid("an external clock needs a channel".into()))?;
-            let (hook_clock, hook_timers) = (clock.clone(), timers.clone());
+            let (hook_clock, hook_timers, changed) = (clock.clone(), timers.clone(), readiness_changed.clone());
             let hook: CommitHook = Box::new(move |bytes| {
                 if let Ok(raw) = <[u8; 8]>::try_from(bytes) {
                     let ns = i64::from_ne_bytes(raw);
                     let update = hook_clock.set_external(ns);
                     hook_timers.on_clock(update, ns);
+                    if update == Update::First {
+                        changed.send_replace(());
+                    }
                 }
             });
             let mut planner = Planner::new(BTreeMap::new(), options.hints.clone());
@@ -242,6 +248,7 @@ impl ModuleHost {
             started: Instant::now(),
             clock,
             sched: sched.clone(),
+            readiness_changed,
             timers: timers.clone(),
             timer_thread: Mutex::new(None),
             topo: RwLock::new(topology),
@@ -299,7 +306,12 @@ impl ModuleHost {
     }
 
     fn env(&self) -> Env {
-        Env { clock: self.core.clock.clone(), sched: self.core.sched.clone(), timers: self.core.timers.clone() }
+        Env {
+            clock: self.core.clock.clone(),
+            sched: self.core.sched.clone(),
+            timers: self.core.timers.clone(),
+            readiness_changed: self.core.readiness_changed.clone(),
+        }
     }
 
     fn planner(&self, specs: BTreeMap<String, ChannelSpec>) -> Planner {
@@ -573,6 +585,7 @@ impl ModuleHost {
         }
         self.core.timers.disarm(instance.idx);
         self.core.sched.free(instance.idx);
+        self.core.readiness_changed.send_replace(());
     }
 
     pub fn remove_instance(&self, name: &str) -> Result<(), HostError> {
@@ -843,6 +856,7 @@ impl ModuleHost {
         if result.is_ok() {
             log_at!(Level::Info, "host", "port {}.{} bound to {}", instance.name, spec.name, target.as_deref().unwrap_or("nothing"));
         }
+        self.core.readiness_changed.send_replace(());
         result
     }
 

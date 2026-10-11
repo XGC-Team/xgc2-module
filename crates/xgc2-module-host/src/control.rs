@@ -121,6 +121,22 @@ fn ms_to_ns(field: &str, value: Option<f64>) -> Result<Option<i64>, Fault> {
     }
 }
 
+fn describe_wait(query: &str) -> Result<Duration, Fault> {
+    if query.is_empty() {
+        return Ok(Duration::ZERO);
+    }
+    let invalid = || Fault::new("invalid_argument", "describe takes only wait_ready_ms between 0 and 30000");
+    let value = query.strip_prefix("wait_ready_ms=").ok_or_else(invalid)?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let millis: u64 = value.parse().map_err(|_| invalid())?;
+    if millis > 30_000 {
+        return Err(invalid());
+    }
+    Ok(Duration::from_millis(millis))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LoadRequest {
@@ -188,6 +204,10 @@ async fn route(context: Context, host: ModuleHost, instance_id: String, path: St
     if context.method == Method::GET {
         return match path.as_str() {
             "/v1/describe" => {
+                let wait = describe_wait(&context.query)?;
+                if !wait.is_zero() {
+                    host.wait_ready(context.deadline.min(tokio::time::Instant::now() + wait)).await;
+                }
                 let (ready, facts) = host.describe();
                 Ok(json!({"service": SERVICE, "api_version": API_VERSION, "instance_id": instance_id, "ready": ready, "facts": facts}))
             }

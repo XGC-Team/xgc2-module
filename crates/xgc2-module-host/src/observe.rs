@@ -96,6 +96,20 @@ impl ModuleHost {
         self.describe().0
     }
 
+    /// Subscribe before checking readiness so a concurrent change cannot be missed.
+    /// The request owns this receiver; cancellation drops it with the handler future.
+    pub(crate) async fn wait_ready(&self, deadline: tokio::time::Instant) {
+        let mut changed = self.core.readiness_changed.subscribe();
+        let _ = tokio::time::timeout_at(deadline, async {
+            while !self.is_ready() {
+                if changed.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
+
     pub fn health(&self) -> Value {
         let topo = self.topo();
         let (configured, live, abandoned) = self.core.sched.worker_counts();
