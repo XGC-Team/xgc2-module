@@ -1,0 +1,61 @@
+{
+  "apiVersion": "xgc.execution.process/v1",
+  "definitions": [
+    {
+      "id": "xgc2-module-host",
+      "version": "0.2.0",
+      "label": "XGC2 module host",
+      "description": "Runs the modules of one entity from an authored manifest with a private XRPC control socket.",
+      "parameters": {
+        "properties": {
+          "manifestPath": {
+            "type": "string",
+            "description": "Authored TOML manifest; relative library and socket paths resolve against its directory.",
+            "x-xgc-path-kind": "file",
+            "x-xgc-file-extensions": [
+              ".toml"
+            ]
+          },
+          "controlSocket": {
+            "type": "string",
+            "description": "Private Unix control socket allocated by the process supervisor.",
+            "default": "",
+            "fixedOnly": true
+          }
+        },
+        "required": [
+          "manifestPath"
+        ]
+      },
+      "command": {
+        "executable": "xgc2-module-host",
+        "args": [
+          "--manifest",
+          "${manifestPath}",
+          "--control-socket",
+          "${controlSocket}"
+        ]
+      },
+      "services": [
+        {
+          "service": "xgc2-module",
+          "api_version": "v1",
+          "profile": "http.v1",
+          "endpointParameter": "controlSocket"
+        }
+      ],
+      "readiness": {
+        "kind": "describe",
+        "startGraceMs": 15000,
+        "timeoutMs": 30000
+      },
+      "stop": {
+        "graceMs": 15000
+      },
+      "logs": {
+        "maxBytes": 1048576,
+        "files": 3
+      }
+    }
+  ]
+}

@@ -29,6 +29,8 @@ trap 'rm -rf -- "$work"' EXIT
 
 tree="$work/package"
 install -D -m 0755 -s "$binary" "$tree/usr/bin/xgc2-module-host"
+install -D -m 0644 "$root/process-definitions/xgc2-module-host.json" \
+  "$tree/usr/share/xgc2/process-definitions/xgc2-module-host.json"
 install -D -m 0644 "$root/README.md" "$tree/usr/share/doc/$package/README.md"
 for doc in architecture manifest control-api; do
   install -D -m 0644 "$root/docs/$doc.md" "$tree/usr/share/doc/$package/$doc.md"

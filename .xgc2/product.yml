@@ -37,6 +37,7 @@ ownership:
   - /usr/share/cmake/Xgc2Module
   - /usr/bin/xgc2-module-host
   - /usr/share/doc/xgc2-module-host
+  - /usr/share/xgc2/process-definitions/xgc2-module-host.json
 release:
   repository: XGC-Team/xgc2-sync-runtime
   ref: main

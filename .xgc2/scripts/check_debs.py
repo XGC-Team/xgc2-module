@@ -28,6 +28,7 @@ SDK_FILES = {
 }
 HOST_FILES = {
     'usr/bin/xgc2-module-host',
+    'usr/share/xgc2/process-definitions/xgc2-module-host.json',
     'usr/share/doc/xgc2-module-host/README.md',
     'usr/share/doc/xgc2-module-host/architecture.md',
     'usr/share/doc/xgc2-module-host/manifest.md',
