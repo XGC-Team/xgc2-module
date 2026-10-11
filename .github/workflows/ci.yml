@@ -15,39 +15,29 @@ permissions:
 defaults:
   run:
     shell: bash
-env:
-  # Releases are built with the minimum supported Rust version, and clippy is pinned to it so
-  # that a new stable lint cannot break the build.
-  MSRV: 1.85.0
 jobs:
   test:
-    name: cargo test (${{ matrix.toolchain }})
-    runs-on: ubuntu-latest
+    name: cargo test (${{ matrix.distribution }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, "1.85.0"]
+        # The XGC2 build image of each release brings the Rust toolchain and that release's compilers,
+        # so the test modules and the SDK are checked with the oldest and the newest compilers.
+        distribution: [focal, noble]
     steps:
       - uses: actions/checkout@v4
-      - name: Install the Rust toolchain
-        run: rustup toolchain install "${{ matrix.toolchain }}" --profile minimal --component rustfmt --component clippy
-      - name: Format and lints
-        if: matrix.toolchain == '1.85.0'
-        run: |
-          cargo +"$MSRV" fmt --all --check
-          cargo +"$MSRV" clippy --locked --all-targets -- -D warnings
-          RUSTDOCFLAGS="-D warnings" cargo +"$MSRV" doc --locked --no-deps
-      - name: Unit and integration tests (the integration tests compile the C and C++ test modules in tests/modules)
-        run: cargo +"${{ matrix.toolchain }}" test --locked
-      - name: The SDK as a module author consumes it
-        run: python3 sdk/tests/test_sdk.py --work-dir "$RUNNER_TEMP/sdk-check"
+      - name: Documentation, unit and integration tests (the integration tests compile the C and C++ test modules in tests/modules) and the SDK as a module author consumes it
+        run: .xgc2/scripts/ci_test.sh --distribution "${{ matrix.distribution }}"
   build-host:
-    name: Host binary on Ubuntu 18.04 (${{ matrix.arch }})
+    name: Host binary in the Ubuntu 18.04 image (${{ matrix.arch }})
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {arch: amd64, runner: ubuntu-latest}
+          - {arch: amd64, runner: ubuntu-24.04}
           - {arch: arm64, runner: ubuntu-24.04-arm}
     runs-on: ${{ matrix.runner }}
     steps:
@@ -62,13 +52,14 @@ jobs:
   packages:
     name: Packages ${{ matrix.distribution }} (${{ matrix.arch }})
     needs: [test, build-host]
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         distribution: [bionic, focal, noble]
         arch: [amd64, arm64]
         include:
-          - {arch: amd64, runner: ubuntu-latest}
+          - {arch: amd64, runner: ubuntu-24.04}
           - {arch: arm64, runner: ubuntu-24.04-arm}
     runs-on: ${{ matrix.runner }}
     steps:
@@ -77,7 +68,7 @@ jobs:
         with:
           name: xgc2-module-host-binary-${{ matrix.arch }}
           path: ${{ runner.temp }}/host
-      - name: Build both packages, install them in a plain Ubuntu image of the release and check them
+      - name: Build both packages, install them in the XGC2 build image of the release and check them
         run: |
           chmod +x "$RUNNER_TEMP/host/xgc2-module-host"
           .xgc2/scripts/ci_package.sh --distribution "${{ matrix.distribution }}" --architecture "${{ matrix.arch }}" \

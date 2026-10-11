@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and check both packages for one distribution inside a plain Ubuntu image of that
+# Build and check both packages for one distribution inside the XGC2 build image of that
 # release, from a host binary that ci_build_host.sh produced. The check installs the packages
 # with dpkg and runs the binary there, so it also proves the glibc 2.27 build runs on
 # that release.
@@ -21,9 +21,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$distribution" && -n "$architecture" && -n "$binary" && -n "$output" ]] || usage
 case "$distribution" in
-  bionic) image=ubuntu:18.04;;
-  focal) image=ubuntu:20.04;;
-  noble) image=ubuntu:24.04;;
+  bionic|focal|noble) image="$("$root/.xgc2/scripts/ci_image.sh" "$distribution")";;
   *) usage;;
 esac
 binary="$(cd "$(dirname "$binary")" && pwd -P)/$(basename "$binary")"
@@ -36,9 +34,6 @@ docker run --rm -e DISTRIBUTION="$distribution" -e ARCHITECTURE="$architecture" 
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
   -v "$root:/workspace/source:ro" -v "$binary:/workspace/xgc2-module-host:ro" -v "$output:/workspace/out" \
   "$image" bash -euo pipefail -c '
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq --no-install-recommends binutils build-essential ca-certificates cmake dpkg-dev python3 > /dev/null
     cd /workspace/source
     .xgc2/scripts/build_sdk_deb.sh --distribution "$DISTRIBUTION" --output /workspace/out
     .xgc2/scripts/build_host_deb.sh --distribution "$DISTRIBUTION" --architecture "$ARCHITECTURE" \

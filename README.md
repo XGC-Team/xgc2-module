@@ -30,6 +30,12 @@ Ubuntu 18.04 (bionic), 20.04 (focal) and 24.04 (noble), amd64 and arm64. The hos
 once against the oldest of them. Building from source needs Rust 1.85 or newer, a C and a C++ compiler for the test
 modules, and cmake for the SDK package.
 
+CI runs in the XGC2 build images (`ghcr.io/xgc-team/xgc2-images/xgc2-build-<release>-dev`), which carry the Rust 1.93
+toolchain and install nothing: the host binary is built in the Ubuntu 18.04 image, the tests run in the 20.04 and 24.04
+images and the packages are built and installed in the image of each release. The images carry no older toolchain and no
+rustfmt or clippy, so the minimum supported Rust version (`cargo +1.85.0 test --locked`), `cargo fmt --check` and
+`cargo clippy --locked --all-targets -- -D warnings` are checked on a developer machine before a change is pushed.
+
 ## Parts
 
 | Path | What |
