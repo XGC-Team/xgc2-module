@@ -7,9 +7,9 @@
 //! POST /v1/modules/load          {path, name?, sha256?}
 //! POST /v1/modules/unload        {module}
 //! POST /v1/instances/add         {name, module, config?, period_ms?, step_budget_ms?, hang_limit_ms?,
-//!                                 required?, autostart?, bind?}
+//!                                 required?, autostart?, affinity?, bind?}
 //! POST /v1/instances/remove      {name}
-//! POST /v1/instances/replace     {name, module?, config?}
+//! POST /v1/instances/replace     {name, module?, config?, affinity?}
 //! POST /v1/instances/configure   {name, config?, period_ms?, step_budget_ms?, hang_limit_ms?}
 //! POST /v1/instances/start       {name}
 //! POST /v1/instances/stop        {name}
@@ -21,6 +21,7 @@
 //! queueing. Reads never wait for a module.
 
 use crate::host::{HostError, InstanceSpec, ModuleHost};
+use crate::scheduler::Affinity;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -139,6 +140,7 @@ struct UnloadRequest {
 struct AddRequest {
     name: String,
     module: String,
+    affinity: Option<Affinity>,
     config: Option<Value>,
     period_ms: Option<f64>,
     step_budget_ms: Option<f64>,
@@ -161,6 +163,7 @@ struct ReplaceRequest {
     name: String,
     module: Option<String>,
     config: Option<Value>,
+    affinity: Option<Affinity>,
 }
 
 #[derive(Deserialize)]
@@ -206,7 +209,7 @@ enum Operation {
     Unload(String),
     Add(InstanceSpec),
     Remove(String),
-    Replace { name: String, module: Option<String>, config: Option<String> },
+    Replace { name: String, module: Option<String>, config: Option<String>, affinity: Option<Affinity> },
     Configure { name: String, config: Option<String>, timing: [Option<i64>; 3] },
     Start(String),
     Stop(String),
@@ -220,6 +223,7 @@ fn parse_operation(path: &str, body: Value) -> Result<Operation, Fault> {
         "/v1/instances/add" => {
             let add: AddRequest = request(body)?;
             let mut spec = InstanceSpec::new(&add.name, &add.module);
+            spec.affinity = add.affinity.unwrap_or_default();
             if let Some(config) = config_json(add.config)? {
                 spec.config_json = config;
             }
@@ -234,7 +238,12 @@ fn parse_operation(path: &str, body: Value) -> Result<Operation, Fault> {
         "/v1/instances/remove" => Operation::Remove(request::<NameRequest>(body)?.name),
         "/v1/instances/replace" => {
             let replace: ReplaceRequest = request(body)?;
-            Operation::Replace { name: replace.name, module: replace.module, config: config_json(replace.config)? }
+            Operation::Replace {
+                name: replace.name,
+                module: replace.module,
+                config: config_json(replace.config)?,
+                affinity: replace.affinity,
+            }
         }
         "/v1/instances/configure" => {
             let configure: ConfigureRequest = request(body)?;
@@ -271,7 +280,7 @@ fn perform(host: &ModuleHost, operation: Operation) -> Result<Value, HostError> 
         Operation::Unload(module) => host.unload_module(&module).map(|()| json!({"unloaded": module})),
         Operation::Add(spec) => host.add_instance(spec),
         Operation::Remove(name) => host.remove_instance(&name).map(|()| json!({"removed": name})),
-        Operation::Replace { name, module, config } => host.replace_instance(&name, module.as_deref(), config),
+        Operation::Replace { name, module, config, affinity } => host.replace_instance(&name, module.as_deref(), config, affinity),
         Operation::Configure { name, config, timing: [period, budget, hang] } => {
             if period.is_some() || budget.is_some() || hang.is_some() {
                 host.set_timing(&name, period, budget, hang)?;

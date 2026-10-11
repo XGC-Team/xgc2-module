@@ -140,6 +140,41 @@ fn every_endpoint_round_trips() {
     assert_eq!(c.get("/v1/modules")["modules"].as_array().unwrap().len(), 1);
 }
 
+#[test]
+fn affinity_is_exposed_validated_and_preserved_or_changed_on_replace() {
+    let c = Control::new();
+    c.ok("/v1/modules/load", json!({"path": c.path_of("thread_probe"), "name": "probe"}));
+    let added = c.ok("/v1/instances/add", json!({"name": "sticky", "module": "probe", "config": {"strict": false}}));
+    assert_eq!(added["affinity"], "sticky");
+    assert_eq!(added["worker"], 0);
+    let replaced = c.ok("/v1/instances/replace", json!({"name": "sticky"}));
+    assert_eq!(replaced["affinity"], "sticky");
+    assert_eq!(replaced["worker"], added["worker"]);
+    let added = c.ok("/v1/instances/add", json!({"name": "any", "module": "probe", "affinity": "any", "config": {"strict": false}}));
+    assert_eq!(added["affinity"], "any");
+    assert_eq!(c.ok("/v1/instances/replace", json!({"name": "any"}))["affinity"], "any");
+    let sticky = c.ok("/v1/instances/replace", json!({"name": "any", "affinity": "sticky"}));
+    assert_eq!(sticky["affinity"], "sticky");
+    assert_eq!(sticky["worker"], 1);
+    assert_eq!(c.get("/v1/health")["workers"]["sticky"], json!([1, 1]));
+    let free = c.ok("/v1/instances/replace", json!({"name": "sticky", "affinity": "any"}));
+    assert_eq!(free["affinity"], "any");
+    assert_eq!(c.get("/v1/health")["workers"]["sticky"], json!([0, 1]));
+    for path in ["/v1/health", "/v1/describe"] {
+        let answer = c.get(path);
+        let instances = if path == "/v1/describe" { &answer["facts"]["instances"] } else { &answer["instances"] };
+        let probe = instances.as_array().unwrap().iter().find(|i| i["name"] == "any").unwrap();
+        assert_eq!(probe["affinity"], "sticky");
+        assert_eq!(probe["worker"], 1);
+        assert_eq!(probe["worker_moves"], 0);
+    }
+    for path in ["/v1/instances/add", "/v1/instances/replace"] {
+        let (code, message) = failure(c.post(path, json!({"name": "any", "module": "probe", "affinity": "free"})).unwrap_err());
+        assert_eq!(code, "invalid_argument");
+        assert!(message.contains("sticky") && message.contains("any"), "{message}");
+    }
+}
+
 fn sha_of(name: &str) -> String {
     xgc2_module_host::loader::sha256_hex(&std::fs::read(module(name)).unwrap())
 }

@@ -14,7 +14,7 @@ use crate::log::Level;
 use crate::log_at;
 use crate::names;
 use crate::plan::{port_channels, ChannelSpec, Hint, Planner};
-use crate::scheduler::{Runner, Scheduler, Taken, Worker, MAX_INSTANCES};
+use crate::scheduler::{Affinity, Placement, Runner, Scheduler, Taken, Worker, MAX_INSTANCES};
 use crate::timers::Timers;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -99,6 +99,7 @@ pub struct InstanceSpec {
     pub name: String,
     /// Registry handle of the module.
     pub module: String,
+    pub affinity: Affinity,
     pub config_json: String,
     pub period_ns: i64,
     pub step_budget_ns: Option<i64>,
@@ -114,6 +115,7 @@ impl InstanceSpec {
         InstanceSpec {
             name: name.to_owned(),
             module: module.to_owned(),
+            affinity: Affinity::Sticky,
             config_json: "{}".to_owned(),
             period_ns: 0,
             step_budget_ns: None,
@@ -513,7 +515,12 @@ impl ModuleHost {
         check_limits(budget, hang).map_err(|e| HostError::Invalid(format!("instance {}: {e}", spec.name)))?;
         let params =
             Params { config_json: spec.config_json.clone(), period_ns: spec.period_ns, step_budget_ns: budget, hang_limit_ns: hang };
-        let (idx, generation) = self.core.sched.alloc().ok_or_else(|| HostError::Conflict(format!("at most {MAX_INSTANCES} instances")))?;
+        let placement = match spec.affinity {
+            Affinity::Sticky => Placement::Balanced,
+            Affinity::Any => Placement::Any,
+        };
+        let (idx, generation) =
+            self.core.sched.alloc(placement).ok_or_else(|| HostError::Conflict(format!("at most {MAX_INSTANCES} instances")))?;
         let instance = Instance::new(&spec.name, &spec.module, module, spec.required, params, idx, generation, self.env());
         if let Err(error) = self.connect(&instance, &bindings, &specs) {
             self.core.sched.free(idx);
@@ -619,8 +626,15 @@ impl ModuleHost {
     /// Replace an instance by a new instance of `module` (default: a fresh instance of the
     /// same module). The new instance takes over the channels, the event backlog and, unless
     /// `config_json` is given, the configuration. If the new instance cannot start, the
-    /// previous one is restarted.
-    pub fn replace_instance(&self, name: &str, module: Option<&str>, config_json: Option<String>) -> Result<Value, HostError> {
+    /// previous one is restarted. Omitted affinity preserves the previous affinity; sticky
+    /// replacements keep their home slot.
+    pub fn replace_instance(
+        &self,
+        name: &str,
+        module: Option<&str>,
+        config_json: Option<String>,
+        affinity: Option<Affinity>,
+    ) -> Result<Value, HostError> {
         let _control = self.exclusive()?;
         let old = self.instance(name)?;
         if old.state() == State::Isolated {
@@ -632,7 +646,7 @@ impl ModuleHost {
         if let Some(config) = config_json {
             params.config_json = config;
         }
-        let new = self.swap(&old, &handle, module, params)?;
+        let new = self.swap(&old, &handle, module, params, affinity.unwrap_or(old.affinity))?;
         Ok(self.instance_json(&new))
     }
 
@@ -679,11 +693,23 @@ impl ModuleHost {
         Ok((bindings, planner.into_specs()))
     }
 
-    fn swap(&self, old: &Arc<Instance>, handle: &str, module: Arc<Module>, params: Params) -> Result<Arc<Instance>, HostError> {
+    fn swap(
+        &self,
+        old: &Arc<Instance>,
+        handle: &str,
+        module: Arc<Module>,
+        params: Params,
+        affinity: Affinity,
+    ) -> Result<Arc<Instance>, HostError> {
         let name = old.name.clone();
         let (bindings, specs) = self.plan_replacement(old, &module)?;
         // Create the new instance while the old one keeps running.
-        let (idx, generation) = self.core.sched.alloc().ok_or_else(|| HostError::Conflict(format!("at most {MAX_INSTANCES} instances")))?;
+        let placement = match affinity {
+            Affinity::Sticky => self.core.sched.cell(old.idx).home().map_or(Placement::Balanced, Placement::Slot),
+            Affinity::Any => Placement::Any,
+        };
+        let (idx, generation) =
+            self.core.sched.alloc(placement).ok_or_else(|| HostError::Conflict(format!("at most {MAX_INSTANCES} instances")))?;
         let new = Instance::new(&name, handle, module, old.required, params, idx, generation, self.env());
         self.topo_mut().slots[idx as usize] = Some(new.clone());
         let created = new.post(OpKind::Create);

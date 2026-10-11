@@ -5,8 +5,8 @@
 //!   hop 1  producer commit -> stage step start
 //!   hop 2  stage commit    -> sink step start
 //!   total  producer commit -> sink step start
-//! together with the CPU time the whole process used. Further scenarios: a single worker, a
-//! fan-out to four sinks, and an idle host. `XGC2_BENCH_SECONDS` (default 20) sets the length
+//! together with the CPU time the whole process used, for sticky and any affinity. Further
+//! scenarios: a single worker, a fan-out to four sinks, and an idle host. `XGC2_BENCH_SECONDS` (default 20) sets the length
 //! of each measurement; `XGC2_BENCH_OUT` names a file that receives the markdown report.
 
 #[path = "../tests/common/mod.rs"]
@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
+use xgc2_module_host::scheduler::Affinity;
 
 struct Percentiles {
     count: usize,
@@ -149,27 +150,34 @@ struct Chain {
     missed: u64,
 }
 
-fn chain(workers: usize, seconds: f64) -> Chain {
+fn chain(workers: usize, seconds: f64, affinity: Affinity) -> Chain {
     let dir = tempfile::tempdir().unwrap();
     let (hop1, hop2, total) = (dir.path().join("hop1.bin"), dir.path().join("hop2.bin"), dir.path().join("total.bin"));
     let f = Fixture::with("bench", |options| options.workers = workers);
     f.load_module("producer_state");
     f.load_module("passthrough");
     f.load_module("consumer");
-    f.add(spec(
+    let add = |mut instance: xgc2_module_host::host::InstanceSpec| {
+        instance.affinity = affinity;
+        f.add(instance);
+    };
+    add(spec(
         "sink",
         "consumer",
         0.0,
         &json!({"latency_file": hop2, "origin_file": total, "report_every": 0}).to_string(),
         &[("state_in", "c")],
     ));
-    f.add(spec("stage", "passthrough", 0.0, &json!({"latency_file": hop1, "report_every": 0}).to_string(), &[("in", "a"), ("out", "c")]));
-    f.add(spec("producer", "producer_state", 2.0, r#"{"report_every":0}"#, &[("out", "a")]));
+    add(spec("stage", "passthrough", 0.0, &json!({"latency_file": hop1, "report_every": 0}).to_string(), &[("in", "a"), ("out", "c")]));
+    add(spec("producer", "producer_state", 2.0, r#"{"report_every":0}"#, &[("out", "a")]));
     sleep_ms(1000);
     let window = measure(|| std::thread::sleep(Duration::from_secs_f64(seconds)));
     let health = f.host.health();
     let find = |name: &str| health["instances"].as_array().unwrap().iter().find(|i| i["name"] == name).unwrap().clone();
     let (producer, stage, sink) = (find("producer"), find("stage"), find("sink"));
+    for instance in [&producer, &stage, &sink] {
+        assert_eq!(instance["affinity"], affinity.as_str());
+    }
     let host_latency = |i: &Value, key: &str| i["handoff_latency"][key].as_u64().unwrap_or(0);
     let steps = [count(&producer["steps"]), count(&stage["steps"]), count(&sink["steps"])];
     let host_p50_ns = [host_latency(&stage, "p50_ns"), host_latency(&sink, "p50_ns")];
@@ -198,15 +206,19 @@ struct Fanout {
     latency: Percentiles,
 }
 
-/// One 500 Hz producer, four sinks that all read each sample.
+/// One 500 Hz producer, four sinks that all read each sample, with any affinity.
 fn fanout(workers: usize, seconds: f64) -> Fanout {
     let dir = tempfile::tempdir().unwrap();
     let f = Fixture::with("bench-fanout", |options| options.workers = workers);
     f.load_module("producer_state");
     f.load_module("consumer");
+    let add = |mut instance: xgc2_module_host::host::InstanceSpec| {
+        instance.affinity = Affinity::Any;
+        f.add(instance);
+    };
     let files: Vec<_> = (0..4).map(|i| dir.path().join(format!("sink{i}.bin"))).collect();
     for (i, file) in files.iter().enumerate() {
-        f.add(spec(
+        add(spec(
             &format!("sink{i}"),
             "consumer",
             0.0,
@@ -214,7 +226,7 @@ fn fanout(workers: usize, seconds: f64) -> Fanout {
             &[("state_in", "a")],
         ));
     }
-    f.add(spec("producer", "producer_state", 2.0, r#"{"report_every":0}"#, &[("out", "a")]));
+    add(spec("producer", "producer_state", 2.0, r#"{"report_every":0}"#, &[("out", "a")]));
     sleep_ms(1000);
     let window = measure(|| std::thread::sleep(Duration::from_secs_f64(seconds)));
     for name in ["producer", "sink0", "sink1", "sink2", "sink3"] {
@@ -260,27 +272,30 @@ fn main() {
 
     let mut chains = Vec::new();
     for workers in [4usize, 2, 1] {
-        eprintln!("chain, {workers} worker(s) ...");
-        chains.push((workers, chain(workers, seconds)));
+        for affinity in [Affinity::Sticky, Affinity::Any] {
+            eprintln!("chain, {workers} worker(s), {} affinity ...", affinity.as_str());
+            chains.push((workers, affinity, chain(workers, seconds, affinity)));
+        }
     }
     writeln!(report, "### Chain: producer (500 Hz) -> stage -> sink\n").unwrap();
-    writeln!(report, "| workers | hop | samples | p50 | p90 | p99 | p99.9 | max |").unwrap();
-    writeln!(report, "|---|---|---|---|---|---|---|---|").unwrap();
-    for (workers, c) in &chains {
+    writeln!(report, "| affinity | workers | hop | samples | p50 | p90 | p99 | p99.9 | max |").unwrap();
+    writeln!(report, "|---|---|---|---|---|---|---|---|---|").unwrap();
+    for (workers, affinity, c) in &chains {
         for (hop, p) in [("producer -> stage", &c.hop1), ("stage -> sink", &c.hop2), ("producer -> sink", &c.total)] {
-            writeln!(report, "| {workers} | {hop} | {} |", cells(p)).unwrap();
+            writeln!(report, "| {} | {workers} | {hop} | {} |", affinity.as_str(), cells(p)).unwrap();
         }
     }
     writeln!(
         report,
-        "\n| workers | process CPU | thread wake-ups/s | preemptions/s | steps (producer/stage/sink) | overruns | missed periods |"
+        "\n| affinity | workers | process CPU | thread wake-ups/s | preemptions/s | steps (producer/stage/sink) | overruns | missed periods |"
     )
     .unwrap();
-    writeln!(report, "|---|---|---|---|---|---|---|").unwrap();
-    for (workers, c) in &chains {
+    writeln!(report, "|---|---|---|---|---|---|---|---|").unwrap();
+    for (workers, affinity, c) in &chains {
         writeln!(
             report,
-            "| {workers} | {:.2}% of one core | {:.0} | {:.1} | {}/{}/{} | {} | {} |",
+            "| {} | {workers} | {:.2}% of one core | {:.0} | {:.1} | {}/{}/{} | {} | {} |",
+            affinity.as_str(),
             c.window.cpu_percent,
             c.window.wakeups_per_s,
             c.window.preemptions_per_s,
@@ -292,25 +307,28 @@ fn main() {
         )
         .unwrap();
     }
-    for (workers, c) in &chains {
+    for (workers, affinity, c) in &chains {
         let threads: Vec<String> =
             c.window.by_thread.iter().filter(|(_, rate)| *rate >= 1.0).map(|(name, rate)| format!("{name} {rate:.0}")).collect();
-        writeln!(report, "\nThread wake-ups per second with {workers} worker(s): {}.", threads.join(", ")).unwrap();
+        writeln!(report, "\nThread wake-ups per second with {workers} worker(s), {} affinity: {}.", affinity.as_str(), threads.join(", "))
+            .unwrap();
     }
-    let first = &chains[0].1;
-    writeln!(
+    for (_, affinity, c) in chains.iter().filter(|(workers, _, _)| *workers == 4) {
+        writeln!(
         report,
-        "\nHost-side histogram of the same hops with 4 workers (bucket error up to 12.5%): stage p50/p99 {:.1}/{:.1}, sink p50/p99 {:.1}/{:.1}.",
-        micros(first.host_p50_ns[0] as i64),
-        micros(first.host_p99_ns[0] as i64),
-        micros(first.host_p50_ns[1] as i64),
-        micros(first.host_p99_ns[1] as i64)
+        "\nHost-side histogram of the same hops with 4 workers, {} affinity (bucket error up to 12.5%): stage p50/p99 {:.1}/{:.1}, sink p50/p99 {:.1}/{:.1}.",
+        affinity.as_str(),
+        micros(c.host_p50_ns[0] as i64),
+        micros(c.host_p99_ns[0] as i64),
+        micros(c.host_p50_ns[1] as i64),
+        micros(c.host_p99_ns[1] as i64)
     )
     .unwrap();
+    }
 
     eprintln!("fan-out ...");
     let fan = fanout(4, seconds);
-    writeln!(report, "\n### Fan-out: producer (500 Hz) -> 4 sinks, 4 workers\n").unwrap();
+    writeln!(report, "\n### Fan-out: producer (500 Hz) -> 4 sinks, 4 workers, any affinity\n").unwrap();
     writeln!(report, "| samples | p50 | p90 | p99 | p99.9 | max |").unwrap();
     writeln!(report, "|---|---|---|---|---|---|").unwrap();
     writeln!(report, "| {} |", cells(&fan.latency)).unwrap();

@@ -66,6 +66,7 @@ published while the entity starts must not be missed.
 |---|---|---|
 | `name` | | Instance name. Required, unique. |
 | `module` | | A `[[module]]` name. Required. |
+| `affinity` | `"sticky"` | `"sticky"` keeps all lifecycle calls and steps on one pool worker; `"any"` permits dispatch on any worker. |
 | `period_ms` | none | Period timer in milliseconds (a float is fine), up to 3600000. Without it the instance runs only for inputs, `wake()` and configure. |
 | `step_budget_ms` | one period, else 50 | A longer step marks the instance `degraded`. |
 | `hang_limit_ms` | ten budgets, at least 100 | A module call longer than this isolates the instance. At least 20 and not below the budget. |
@@ -73,6 +74,18 @@ published while the entity starts must not be missed.
 | `autostart` | `true` | `false` creates the instance and leaves it stopped until `instances/start`. |
 | `[instance.config]` | `{}` | A TOML table, passed to `create` and `configure` as a JSON object text. Dates become RFC 3339 strings; NaN and infinity are errors. |
 | `[instance.bind]` | | `port = "channel"` for every port that is not private. Output ports left out get a private channel `<instance>.<port>`; input ports left out stay unconnected. |
+
+Sticky affinity supports thread-affine libraries such as xgc2-state-machine, which binds a machine to the first
+thread that updates it, and retains worker cache locality without a thread per module. The home worker is the slot
+with the fewest sticky instances when the instance is added (lowest slot on ties); it stays fixed across stop/start
+and replacement. `instances/replace` preserves affinity when omitted and accepts an explicit change. Changing an
+`any` instance to sticky chooses a home slot then.
+
+Balanced sticky instances in a chain can occupy different workers, so each hop wakes the next worker. With `any`,
+run-next lets a chain execute on one worker with fewer wake-ups and lower handoff cost. Instances sharing a sticky
+worker wait for each other's calls, including a hung call until the watchdog replaces that worker in the same slot.
+That recovery changes the OS thread; a failed replacement spawn lets surviving workers serve the orphaned lane.
+See the measured sticky/any comparison in [validation/2026-10-10.md](validation/2026-10-10.md#benchmark).
 
 ## What is checked, and where
 

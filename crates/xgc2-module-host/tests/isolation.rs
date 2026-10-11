@@ -127,6 +127,6 @@ fn a_replacement_waits_for_nothing_when_the_old_instance_is_stuck() {
     setup(&f);
     f.add(hanging("h", r#"{"hang_after":3}"#, "hang_in", "hang_out"));
     wait_until("isolation", Duration::from_secs(5), || f.instance("h")["state"] == "isolated");
-    let error = f.host.replace_instance("h", None, None).unwrap_err();
+    let error = f.host.replace_instance("h", None, None, None).unwrap_err();
     assert!(matches!(error, HostError::Conflict(_)) && error.to_string().contains("isolated; remove it first"), "{error}");
 }

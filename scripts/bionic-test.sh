@@ -7,6 +7,6 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/bionic-env.sh"
 cd "$root"
-cargo build --locked -j3 --target "$triple" --bins
+cargo build --locked -j2 --target "$triple" --bins
 echo "highest glibc symbol version needed by xgc2-module-host: $(glibc_floor "$CARGO_TARGET_DIR/$triple/debug/xgc2-module-host")"
-cargo test --locked -j3 --target "$triple" "$@"
+cargo test --locked -j2 --target "$triple" "$@"

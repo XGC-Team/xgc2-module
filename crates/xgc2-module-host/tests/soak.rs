@@ -65,7 +65,7 @@ fn random_hot_plug_under_load() {
         match choice {
             0 | 1 => {
                 let module = if random.below(2) == 0 { "pass_1" } else { "pass_2" };
-                must_succeed_or_be_refused("replace stage", host.replace_instance("stage", Some(module), None));
+                must_succeed_or_be_refused("replace stage", host.replace_instance("stage", Some(module), None, None));
             }
             2 => {
                 guests += 1;

@@ -13,6 +13,8 @@
  * Threading rules:
  * - create/configure/start/step/stop/destroy are called by host worker threads, never concurrently
  *   for the same instance (an instance is a serial task). Different instances may run in parallel.
+ *   The default sticky affinity keeps all calls on one worker; any affinity permits migration.
+ *   Replacing a hung worker changes the OS thread while retaining its pool slot.
  * - write_begin/write_commit/write_abort may be called from step, or from module-owned threads for
  *   output ports flagged XGC2_PORT_ASYNC_WRITER (one writer thread at a time per port).
  * - read_latest/read_next/changed are only valid inside step; views are borrowed until step returns.

@@ -13,11 +13,11 @@ use crate::loader::{Dir, Module, PortSpec};
 use crate::log::Level;
 use crate::log_at;
 use crate::metrics::Histogram;
-use crate::scheduler::{Scheduler, Taken, Worker, REASON_INPUT, REASON_OPS, REASON_TIMER, REASON_WAKE};
+use crate::scheduler::{Affinity, Scheduler, Taken, Worker, REASON_INPUT, REASON_OPS, REASON_TIMER, REASON_WAKE};
 use crate::timers::{Timers, MIN_PERIOD_NS};
 use std::collections::VecDeque;
 use std::ffi::{c_void, CString};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicPtr, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicPtr, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -245,6 +245,11 @@ pub struct Instance {
     pub generation: u32,
     pub module: Arc<Module>,
     pub required: bool,
+    pub affinity: Affinity,
+    /// Pool slot that last ran this instance (the home slot before the first sticky run).
+    worker_slot: AtomicUsize,
+    last_worker_id: AtomicUsize,
+    pub worker_moves: AtomicU64,
     pub ports: Vec<PortRt>,
     pub stats: Stats,
     env: Env,
@@ -287,6 +292,7 @@ impl Instance {
             .enumerate()
             .map(|(index, spec)| PortRt { spec: spec.clone(), input_bit: module.input_bit(index), io: Mutex::new(PortIo::Unbound) })
             .collect();
+        let home = env.sched.cell(idx).home();
         Arc::new(Instance {
             name: name.to_owned(),
             module_handle: module_handle.to_owned(),
@@ -294,6 +300,10 @@ impl Instance {
             generation,
             module,
             required,
+            affinity: if home.is_some() { Affinity::Sticky } else { Affinity::Any },
+            worker_slot: AtomicUsize::new(home.unwrap_or(usize::MAX)),
+            last_worker_id: AtomicUsize::new(usize::MAX),
+            worker_moves: AtomicU64::new(0),
             ports,
             stats: Stats::default(),
             wake: Arc::new(InputWake { sched: env.sched.clone(), idx, generation }),
@@ -323,6 +333,11 @@ impl Instance {
 
     pub fn state(&self) -> State {
         State::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    pub fn worker_slot(&self) -> Option<usize> {
+        let slot = self.worker_slot.load(Ordering::Relaxed);
+        (slot != usize::MAX).then_some(slot)
     }
 
     fn set_state(&self, state: State) {
@@ -718,6 +733,11 @@ impl Instance {
 
     /// Execute queued operations and then at most one step. Called on a pool worker.
     pub fn run(&self, taken: Taken, worker: &Worker) {
+        let previous = self.last_worker_id.swap(worker.id, Ordering::Relaxed);
+        if previous != usize::MAX && previous != worker.id {
+            self.worker_moves.fetch_add(1, Ordering::Relaxed);
+        }
+        self.worker_slot.store(worker.slot, Ordering::Relaxed);
         let mut configured = false;
         loop {
             let op = lock(&self.ops).pop_front();

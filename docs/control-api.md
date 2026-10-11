@@ -26,12 +26,15 @@ Reads never wait for a module. Mutations are serialized: while one runs, another
 
 | Call | Answer |
 |---|---|
-| `GET /v1/describe` | `{service, api_version, instance_id, ready, facts}`. `facts`: `entity`, `host_version`, `abi`, `clock` (`mode`, `valid`, `now_ns`, `channel`), `instances` (name, module, state, health, required, ready, missing inputs), `modules`, `not_ready` (the reasons). Needs no instance id. |
-| `GET /v1/health` | `entity`, `uptime_ms`, `clock`, `workers`, `instances` (state, health, the module's `reported` detail, `last_error`, timing, `steps`, `step_time`, `handoff_latency`, `wakeups`, `input_commits`, `coalesced_dirties`, `timer_fires`, `missed_periods`, `overruns`, `step_errors`, `spurious_wakeups`, `misuse`, `ports` with their channel), `channels` (kind, schema, size, depth, readers, writers, `commits`, `drops`, `stale`, `stale_reads`, `lag`, `stalls`). |
+| `GET /v1/describe` | `{service, api_version, instance_id, ready, facts}`. `facts`: `entity`, `host_version`, `abi`, `clock` (`mode`, `valid`, `now_ns`, `channel`), `instances` (name, module, state, health, required, affinity, worker, worker_moves, ready, missing inputs), `modules`, `not_ready` (the reasons). Needs no instance id. |
+| `GET /v1/health` | `entity`, `uptime_ms`, `clock`, `workers` (`configured`, `live`, `abandoned`, `sticky`: sticky instance counts by slot), `instances` (state, health, affinity, worker, worker_moves, the module's `reported` detail, `last_error`, timing, `steps`, `step_time`, `handoff_latency`, `wakeups`, `input_commits`, `coalesced_dirties`, `timer_fires`, `missed_periods`, `overruns`, `step_errors`, `spurious_wakeups`, `misuse`, `ports` with their channel), `channels` (kind, schema, size, depth, readers, writers, `commits`, `drops`, `stale`, `stale_reads`, `lag`, `stalls`). |
 | `GET /v1/modules` | the loaded libraries: handle, name, version, path, sha256, ABI, ports, the instances that use them, `pinned`. |
 
 Instance `state` is one of `new`, `created`, `starting`, `running`, `stopping`, `stopped`, `failed`, `isolated`;
 `health` is `ok`, `degraded` (over budget, or reported by the module) or `failed`.
+
+`worker` is the last pool slot that ran the instance; `worker_moves` counts changes of worker identity between
+runs, including an OS thread replaced in the same slot after a hang. A fresh replacement starts its counters at zero.
 
 ## Libraries
 
@@ -48,21 +51,23 @@ loaded, or a handle that is taken, is a `conflict`.
 ```text
 POST /v1/instances/add        {"name": "ctl", "module": "ctl", "config": {...}, "period_ms": 2,
                                "step_budget_ms": 1.5, "hang_limit_ms": 200, "required": true,
-                               "autostart": true, "bind": {"pose": "pose", "command": "cmd"}}
+                               "autostart": true, "affinity": "sticky", "bind": {"pose": "pose", "command": "cmd"}}
 POST /v1/instances/remove     {"name": "ctl"}
-POST /v1/instances/replace    {"name": "ctl", "module": "ctl_next", "config": {...}}    both optional
+POST /v1/instances/replace    {"name": "ctl", "module": "ctl_next", "config": {...}, "affinity": "sticky"}    all except name optional
 POST /v1/instances/configure  {"name": "ctl", "config": {...}, "period_ms": 4, "step_budget_ms": 3, "hang_limit_ms": 300}
 POST /v1/instances/start      {"name": "ctl"}
 POST /v1/instances/stop       {"name": "ctl"}
 POST /v1/bindings             {"instance": "ctl", "port": "pose", "channel": "other_pose"}     channel null disconnects
 ```
 
-* `add` answers with the instance (`name`, `module`, `state`, `health`, timing). All fields except `name` and
+* `add` answers with the instance (`name`, `module`, `state`, `health`, `affinity`, `worker`, `worker_moves`, timing). All fields except `name` and
   `module` are optional and mean what they mean in the [manifest](manifest.md#instance). Failure leaves nothing
   behind.
 * `replace` creates a fresh instance of `module` (default: the current one), moves the channels, the unread event
   backlog and (unless `config` is given) the configuration over, and restarts the old instance if the new one cannot
-  start. The new library must be loaded first, under its own file name and handle.
+  start. The new library must be loaded first, under its own file name and handle. `affinity` is `"sticky"` or
+  `"any"`; omission preserves the old affinity. Sticky replacements retain the old home slot; a change from any to
+  sticky chooses the least-loaded slot. An explicit change affects the fresh instance from `create` onwards.
 * `configure` takes at least one field. `config` is applied by the module between two steps (the module may refuse it:
   `internal`); the timing fields take effect from the next step on.
 * `bindings` connects an input port to a channel, moves an output port, disconnects an input (`null`) or returns an

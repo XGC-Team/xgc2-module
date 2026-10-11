@@ -12,10 +12,10 @@
 //! if reasons arrived meanwhile, so nothing is lost and the instance is never run twice at
 //! once.
 //!
-//! A task made runnable from inside a worker goes to that worker's run-next slot instead of
-//! the shared queue, so a chain producer -> consumer runs back to back on one thread without a
-//! wake-up. The watchdog moves a slot to the shared queue when its worker stays busy, and a
-//! worker takes at most `LOCAL_BURST` (8) local tasks in a row before serving the shared queue.
+//! Sticky tasks use their home worker's lane and condition variable. A task made runnable
+//! on its home worker, or one with any-worker affinity, can use that worker's run-next slot.
+//! The watchdog only steals any-worker tasks, and workers serve the shared queue after at
+//! most `LOCAL_BURST` (8) local tasks. Replacement workers inherit the abandoned worker's slot.
 //!
 //! The timer thread calls [`Scheduler::watchdog`] on every tick: a worker stuck in a module
 //! call beyond its limit is abandoned, the runner isolates the instance and a replacement
@@ -49,6 +49,38 @@ pub const REASON_TIMER: u32 = 1 << 9;
 pub const REASON_WAKE: u32 = 1 << 10;
 pub const REASON_OPS: u32 = 1 << 11;
 const REASONS: u32 = REASON_INPUT | REASON_TIMER | REASON_WAKE | REASON_OPS;
+const HOME_SHIFT: u32 = 16;
+const HOME_ANY: u32 = 0xff;
+const HOME_MASK: u32 = HOME_ANY << HOME_SHIFT;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Affinity {
+    #[default]
+    Sticky,
+    Any,
+}
+
+impl Affinity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sticky => "sticky",
+            Self::Any => "any",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Placement {
+    Any,
+    Balanced,
+    Slot(usize),
+}
+
+fn home(state: u32) -> Option<usize> {
+    let slot = (state & HOME_MASK) >> HOME_SHIFT;
+    (slot != HOME_ANY).then_some(slot as usize)
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -84,7 +116,7 @@ pub struct Cell {
 impl Cell {
     fn new() -> Self {
         Cell {
-            state: AtomicU32::new(DEAD),
+            state: AtomicU32::new(DEAD | HOME_MASK),
             generation: AtomicU32::new(0),
             dirty: AtomicU64::new(0),
             first_dirty_ns: AtomicI64::new(0),
@@ -99,6 +131,10 @@ impl Cell {
     pub fn generation(&self) -> u32 {
         self.generation.load(Ordering::Acquire)
     }
+
+    pub fn home(&self) -> Option<usize> {
+        home(self.state.load(Ordering::Acquire))
+    }
 }
 
 /// Executes the tasks the scheduler hands out. Implemented by the host core.
@@ -112,6 +148,7 @@ pub trait Runner: Send + Sync + 'static {
 /// One pool thread as the watchdog sees it.
 pub struct Worker {
     pub id: usize,
+    pub slot: usize,
     /// Steady time the current guarded call started (0 when idle).
     busy_since_ns: AtomicI64,
     limit_ns: AtomicI64,
@@ -127,9 +164,10 @@ thread_local! {
 }
 
 impl Worker {
-    fn new(id: usize) -> Arc<Worker> {
+    fn new(id: usize, slot: usize) -> Arc<Worker> {
         Arc::new(Worker {
             id,
+            slot,
             busy_since_ns: AtomicI64::new(0),
             limit_ns: AtomicI64::new(0),
             instance: AtomicU32::new(NO_TASK),
@@ -162,12 +200,32 @@ struct Quiesce {
     changed: Condvar,
 }
 
+struct Allocation {
+    used: Vec<bool>,
+    sticky: Vec<usize>,
+}
+
+struct Queues {
+    shared: VecDeque<u32>,
+    lanes: Vec<VecDeque<u32>>,
+    /// FIFO park tickets; selecting a worker consumes its ticket before notifying it.
+    parked: VecDeque<usize>,
+    /// Only a failed spawn lets other workers serve this slot's lane.
+    orphan: Vec<bool>,
+}
+
+impl Queues {
+    fn wake_slot(&mut self, slot: usize) -> Option<usize> {
+        let ticket = self.parked.iter().position(|parked| *parked == slot)?;
+        self.parked.remove(ticket)
+    }
+}
+
 pub struct Scheduler {
     table: Box<[Cell]>,
-    used: Mutex<Vec<bool>>,
-    queue: Mutex<VecDeque<u32>>,
-    queue_changed: Condvar,
-    idle: AtomicUsize,
+    allocation: Mutex<Allocation>,
+    queue: Mutex<Queues>,
+    queue_changed: Vec<Condvar>,
     shutdown: AtomicBool,
     target_workers: usize,
     workers: Mutex<Vec<Arc<Worker>>>,
@@ -179,12 +237,17 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(workers: usize) -> Arc<Scheduler> {
+        assert!(workers > 0 && workers < HOME_ANY as usize);
         Arc::new(Scheduler {
             table: (0..MAX_INSTANCES).map(|_| Cell::new()).collect(),
-            used: Mutex::new(vec![false; MAX_INSTANCES]),
-            queue: Mutex::new(VecDeque::new()),
-            queue_changed: Condvar::new(),
-            idle: AtomicUsize::new(0),
+            allocation: Mutex::new(Allocation { used: vec![false; MAX_INSTANCES], sticky: vec![0; workers] }),
+            queue: Mutex::new(Queues {
+                shared: VecDeque::new(),
+                lanes: (0..workers).map(|_| VecDeque::new()).collect(),
+                parked: VecDeque::new(),
+                orphan: vec![false; workers],
+            }),
+            queue_changed: (0..workers).map(|_| Condvar::new()).collect(),
             shutdown: AtomicBool::new(false),
             target_workers: workers,
             workers: Mutex::new(Vec::new()),
@@ -198,8 +261,8 @@ impl Scheduler {
     /// Start the pool. The runner is released again by [`Scheduler::shutdown`].
     pub fn start(self: &Arc<Self>, runner: Arc<dyn Runner>) {
         *lock(&self.runner) = Some(runner);
-        for _ in 0..self.target_workers {
-            self.spawn_worker();
+        for slot in 0..self.target_workers {
+            self.spawn_worker(slot);
         }
     }
 
@@ -211,14 +274,27 @@ impl Scheduler {
         (self.target_workers, lock(&self.workers).len(), self.abandoned_workers.load(Ordering::Relaxed))
     }
 
+    pub fn sticky_counts(&self) -> Vec<usize> {
+        lock(&self.allocation).sticky.clone()
+    }
+
     // ---- cell allocation -------------------------------------------------------------
 
     /// Reserve a cell for a new instance. It starts paused, so nothing but lifecycle
     /// operations runs until [`Scheduler::resume`].
-    pub fn alloc(&self) -> Option<(u32, u32)> {
-        let mut used = lock(&self.used);
-        let idx = used.iter().position(|taken| !taken)?;
-        used[idx] = true;
+    pub fn alloc(&self, placement: Placement) -> Option<(u32, u32)> {
+        let mut allocation = lock(&self.allocation);
+        let idx = allocation.used.iter().position(|taken| !taken)?;
+        let slot = match placement {
+            Placement::Any => None,
+            Placement::Balanced => allocation.sticky.iter().enumerate().min_by_key(|(_, count)| **count).map(|(slot, _)| slot),
+            Placement::Slot(slot) if slot < self.target_workers => Some(slot),
+            Placement::Slot(_) => return None,
+        };
+        allocation.used[idx] = true;
+        if let Some(slot) = slot {
+            allocation.sticky[slot] += 1;
+        }
         let cell = &self.table[idx];
         let generation = cell.generation.fetch_add(1, Ordering::AcqRel) + 1;
         cell.dirty.store(0, Ordering::Relaxed);
@@ -226,16 +302,22 @@ impl Scheduler {
         for counter in [&cell.wakes, &cell.dirty_commits, &cell.coalesced, &cell.timer_fires, &cell.missed_periods] {
             counter.store(0, Ordering::Relaxed);
         }
-        cell.state.store(PAUSED, Ordering::Release);
+        cell.state.store(PAUSED | (slot.map_or(HOME_ANY, |slot| slot as u32) << HOME_SHIFT), Ordering::Release);
         Some((idx as u32, generation))
     }
 
     /// Release a cell. Raises on a stale reference are ignored from now on.
     pub fn free(&self, idx: u32) {
+        let mut allocation = lock(&self.allocation);
         let cell = self.cell(idx);
         cell.generation.fetch_add(1, Ordering::AcqRel);
-        cell.state.store(DEAD, Ordering::Release);
-        lock(&self.used)[idx as usize] = false;
+        let state = cell.state.swap(DEAD | HOME_MASK, Ordering::AcqRel);
+        if allocation.used[idx as usize] {
+            if let Some(slot) = home(state) {
+                allocation.sticky[slot] -= 1;
+            }
+            allocation.used[idx as usize] = false;
+        }
     }
 
     /// The instance is isolated: no further dispatch, not even lifecycle operations.
@@ -267,7 +349,7 @@ impl Scheduler {
             match cell.state.compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Relaxed) {
                 Ok(_) => {
                     if runnable {
-                        self.enqueue(idx);
+                        self.enqueue(idx, home(next));
                     }
                     return;
                 }
@@ -331,7 +413,7 @@ impl Scheduler {
             match cell.state.compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Relaxed) {
                 Ok(_) => {
                     if runnable {
-                        self.enqueue(idx);
+                        self.enqueue(idx, home(next));
                     }
                     return;
                 }
@@ -360,57 +442,107 @@ impl Scheduler {
 
     // ---- queueing --------------------------------------------------------------------
 
-    fn enqueue(&self, idx: u32) {
+    fn enqueue(&self, idx: u32, home: Option<usize>) {
         let local = CURRENT.with(|current| {
-            current
-                .borrow()
-                .as_ref()
-                .is_some_and(|worker| worker.next.compare_exchange(NO_TASK, idx, Ordering::AcqRel, Ordering::Relaxed).is_ok())
+            current.borrow().as_ref().is_some_and(|worker| {
+                if worker.abandoned() || home.is_some_and(|slot| slot != worker.slot) {
+                    return false;
+                }
+                if worker.next.compare_exchange(NO_TASK, idx, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+                    return false;
+                }
+                // Abandonment may race the insertion. Either the watchdog already spilled
+                // the task, or this caller must spill it before leaving the abandoned thread.
+                !worker.abandoned() || worker.next.compare_exchange(idx, NO_TASK, Ordering::AcqRel, Ordering::Relaxed).is_err()
+            })
         });
         if !local {
-            self.enqueue_shared(idx);
+            self.enqueue_queued(idx, home);
         }
     }
 
-    fn enqueue_shared(&self, idx: u32) {
+    fn enqueue_queued(&self, idx: u32, home: Option<usize>) {
         // Whether a worker is parked is read under the lock that parking happens under, so the
         // decision is exact; the wake-up itself is sent after the unlock, because a worker that
         // wakes while this thread still holds the lock would only block on it again.
         let wake = {
             let mut queue = lock(&self.queue);
-            queue.push_back(idx);
-            self.idle.load(Ordering::Acquire) > 0
+            match home {
+                Some(slot) => {
+                    queue.lanes[slot].push_back(idx);
+                    if queue.orphan[slot] {
+                        queue.parked.pop_front()
+                    } else {
+                        queue.wake_slot(slot)
+                    }
+                }
+                None => {
+                    queue.shared.push_back(idx);
+                    queue.parked.pop_front()
+                }
+            }
         };
-        if wake {
-            self.queue_changed.notify_one();
+        if let Some(slot) = wake {
+            self.queue_changed[slot].notify_one();
         }
     }
 
-    fn pop_blocking(&self, worker: &Worker) -> Option<u32> {
+    fn pop_blocking(&self, worker: &Worker, local_streak: &mut u32) -> Option<u32> {
         let mut queue = lock(&self.queue);
         loop {
             if self.shutdown.load(Ordering::Acquire) || worker.abandoned() {
                 return None;
             }
-            if let Some(idx) = queue.pop_front() {
+            if *local_streak >= LOCAL_BURST {
+                if let Some(idx) = queue.shared.pop_front() {
+                    *local_streak = 0;
+                    return Some(idx);
+                }
+            }
+            let next = worker.next.swap(NO_TASK, Ordering::AcqRel);
+            if next != NO_TASK {
+                *local_streak = local_streak.saturating_add(1);
+                return Some(next);
+            }
+            if let Some(idx) = queue.lanes[worker.slot].pop_front() {
+                *local_streak = local_streak.saturating_add(1);
                 return Some(idx);
             }
-            self.idle.fetch_add(1, Ordering::AcqRel);
-            queue = self.queue_changed.wait(queue).unwrap_or_else(PoisonError::into_inner);
-            self.idle.fetch_sub(1, Ordering::AcqRel);
+            for slot in 0..self.target_workers {
+                if queue.orphan[slot] {
+                    if let Some(idx) = queue.lanes[slot].pop_front() {
+                        *local_streak = local_streak.saturating_add(1);
+                        return Some(idx);
+                    }
+                }
+            }
+            if let Some(idx) = queue.shared.pop_front() {
+                *local_streak = 0;
+                return Some(idx);
+            }
+            queue.parked.push_back(worker.slot);
+            queue = self.queue_changed[worker.slot].wait(queue).unwrap_or_else(PoisonError::into_inner);
+            queue.wake_slot(worker.slot);
         }
     }
 
     // ---- running tasks ---------------------------------------------------------------
 
     /// Claim the task: clear queued, take the eligible reasons and the dirty mask.
-    fn begin_run(&self, idx: u32) -> Option<Taken> {
+    fn begin_run(&self, idx: u32, worker: &Worker) -> Option<Taken> {
         let cell = self.cell(idx);
         let mut state = cell.state.load(Ordering::Acquire);
         let eligible = loop {
             if state & RUNNING != 0 || state & QUEUED == 0 {
                 // A stale queue entry (the cell was recycled); the live entry runs the task.
                 return None;
+            }
+            // A recycled cell can still have an entry in its former worker's lane.
+            if let Some(slot) = home(state).filter(|slot| *slot != worker.slot) {
+                if !lock(&self.queue).orphan[slot] {
+                    self.enqueue_queued(idx, Some(slot));
+                    return None;
+                }
             }
             let eligible = if state & DEAD != 0 { 0 } else { Self::eligible(state) };
             let next = if eligible == 0 { state & !QUEUED } else { (state & !(QUEUED | eligible)) | RUNNING };
@@ -442,7 +574,7 @@ impl Scheduler {
             match cell.state.compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => {
                     if again {
-                        self.enqueue_shared(idx);
+                        self.enqueue_queued(idx, home(next));
                     }
                     if state & PAUSED != 0 {
                         let _guard = lock(&self.quiesce.lock);
@@ -456,7 +588,7 @@ impl Scheduler {
     }
 
     fn run_one(&self, idx: u32, runner: &Arc<dyn Runner>, worker: &Worker) {
-        if let Some(taken) = self.begin_run(idx) {
+        if let Some(taken) = self.begin_run(idx, worker) {
             runner.run(idx, taken, worker);
             if worker.abandoned() {
                 // The instance was isolated while this call was stuck; its cell is dead.
@@ -478,13 +610,7 @@ impl Scheduler {
                 local_streak += 1;
                 local
             } else {
-                local_streak = 0;
-                // A pending run-next task goes behind the shared queue once the burst is over.
-                let stale = worker.next.swap(NO_TASK, Ordering::AcqRel);
-                if stale != NO_TASK {
-                    self.enqueue_shared(stale);
-                }
-                match self.pop_blocking(&worker) {
+                match self.pop_blocking(&worker, &mut local_streak) {
                     Some(idx) => idx,
                     None => break,
                 }
@@ -494,21 +620,29 @@ impl Scheduler {
         // Anything still in the run-next slot must not be lost.
         let leftover = worker.next.swap(NO_TASK, Ordering::AcqRel);
         if leftover != NO_TASK && !self.shutdown.load(Ordering::Acquire) {
-            self.enqueue_shared(leftover);
+            self.enqueue_queued(leftover, self.cell(leftover).home());
         }
         CURRENT.with(|current| *current.borrow_mut() = None);
     }
 
-    fn spawn_worker(self: &Arc<Self>) {
+    fn spawn_worker(self: &Arc<Self>, slot: usize) {
         let Some(runner) = lock(&self.runner).clone() else { return };
         let id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
-        let worker = Worker::new(id);
+        let worker = Worker::new(id, slot);
         lock(&self.workers).push(worker.clone());
         let scheduler = self.clone();
         let spawned = thread::Builder::new().name(format!("xgc2-worker-{id}")).spawn(move || scheduler.worker_main(runner, worker));
         if let Err(error) = spawned {
             log_at!(Level::Error, "scheduler", "cannot spawn worker {id}: {error}");
             lock(&self.workers).retain(|worker| worker.id != id);
+            self.orphan_slot(slot);
+        }
+    }
+
+    fn orphan_slot(&self, slot: usize) {
+        lock(&self.queue).orphan[slot] = true;
+        for changed in &self.queue_changed {
+            changed.notify_one();
         }
     }
 
@@ -533,9 +667,12 @@ impl Scheduler {
             if now - since > limit {
                 self.abandon(&worker, instance);
             } else if now - since > STEAL_AFTER_NS {
-                let stolen = worker.next.swap(NO_TASK, Ordering::AcqRel);
-                if stolen != NO_TASK {
-                    self.enqueue_shared(stolen);
+                let next = worker.next.load(Ordering::Acquire);
+                if next != NO_TASK
+                    && self.cell(next).home().is_none()
+                    && worker.next.compare_exchange(next, NO_TASK, Ordering::AcqRel, Ordering::Relaxed).is_ok()
+                {
+                    self.enqueue_queued(next, None);
                 }
             }
         }
@@ -550,12 +687,12 @@ impl Scheduler {
         self.abandoned_workers.fetch_add(1, Ordering::Relaxed);
         let stolen = worker.next.swap(NO_TASK, Ordering::AcqRel);
         if stolen != NO_TASK {
-            self.enqueue_shared(stolen);
+            self.enqueue_queued(stolen, self.cell(stolen).home());
         }
         if let Some(runner) = lock(&self.runner).clone() {
             runner.hung(instance);
         }
-        self.spawn_worker();
+        self.spawn_worker(worker.slot);
     }
 
     // ---- shutdown --------------------------------------------------------------------
@@ -566,7 +703,9 @@ impl Scheduler {
         self.shutdown.store(true, Ordering::Release);
         {
             let _queue = lock(&self.queue);
-            self.queue_changed.notify_all();
+            for changed in &self.queue_changed {
+                changed.notify_all();
+            }
         }
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
@@ -597,6 +736,7 @@ mod tests {
         sleep_ms: AtomicU64,
         in_flight: Vec<AtomicUsize>,
         overlap: AtomicBool,
+        placements: Mutex<Vec<(u32, usize, usize)>>,
     }
 
     impl CountingRunner {
@@ -608,12 +748,14 @@ mod tests {
                 sleep_ms: AtomicU64::new(0),
                 in_flight: (0..MAX_INSTANCES).map(|_| AtomicUsize::new(0)).collect(),
                 overlap: AtomicBool::new(false),
+                placements: Mutex::new(Vec::new()),
             })
         }
     }
 
     impl Runner for CountingRunner {
         fn run(&self, idx: u32, taken: Taken, worker: &Worker) {
+            lock(&self.placements).push((idx, worker.id, worker.slot));
             if self.in_flight[idx as usize].fetch_add(1, Ordering::SeqCst) != 0 {
                 self.overlap.store(true, Ordering::SeqCst);
             }
@@ -645,7 +787,7 @@ mod tests {
         let scheduler = Scheduler::new(2);
         let runner = CountingRunner::new();
         scheduler.start(runner.clone());
-        let (idx, _) = scheduler.alloc().unwrap();
+        let (idx, _) = scheduler.alloc(crate::scheduler::Placement::Any).unwrap();
         scheduler.raise(idx, REASON_TIMER | REASON_WAKE);
         thread::sleep(Duration::from_millis(30));
         assert_eq!(runner.runs[idx as usize].load(Ordering::SeqCst), 0);
@@ -665,7 +807,7 @@ mod tests {
         let runner = CountingRunner::new();
         runner.sleep_ms.store(40, Ordering::SeqCst);
         scheduler.start(runner.clone());
-        let (idx, generation) = scheduler.alloc().unwrap();
+        let (idx, generation) = scheduler.alloc(crate::scheduler::Placement::Any).unwrap();
         scheduler.resume(idx);
         scheduler.mark_dirty(idx, generation, 1 << 0, 100);
         wait_until("first run starts", || runner.in_flight[idx as usize].load(Ordering::SeqCst) == 1);
@@ -690,7 +832,7 @@ mod tests {
         let scheduler = Scheduler::new(1);
         let runner = CountingRunner::new();
         scheduler.start(runner.clone());
-        let (idx, generation) = scheduler.alloc().unwrap();
+        let (idx, generation) = scheduler.alloc(crate::scheduler::Placement::Any).unwrap();
         scheduler.resume(idx);
         scheduler.free(idx);
         scheduler.mark_dirty(idx, generation, 1, 1);
@@ -699,7 +841,7 @@ mod tests {
         thread::sleep(Duration::from_millis(30));
         assert_eq!(runner.runs[idx as usize].load(Ordering::SeqCst), 0);
         // The slot is reusable and starts clean.
-        let (again, new_generation) = scheduler.alloc().unwrap();
+        let (again, new_generation) = scheduler.alloc(crate::scheduler::Placement::Any).unwrap();
         assert_eq!(again, idx);
         assert!(new_generation > generation);
         assert_eq!(scheduler.cell(again).dirty_commits.load(Ordering::Relaxed), 0);
@@ -711,7 +853,7 @@ mod tests {
         let scheduler = Scheduler::new(4);
         let runner = CountingRunner::new();
         scheduler.start(runner.clone());
-        let (idx, generation) = scheduler.alloc().unwrap();
+        let (idx, generation) = scheduler.alloc(crate::scheduler::Placement::Any).unwrap();
         scheduler.resume(idx);
         let raisers: Vec<_> = (0..4)
             .map(|n| {
@@ -743,7 +885,7 @@ mod tests {
         let runner = CountingRunner::new();
         runner.sleep_ms.store(60, Ordering::SeqCst);
         scheduler.start(runner.clone());
-        let (idx, _) = scheduler.alloc().unwrap();
+        let (idx, _) = scheduler.alloc(crate::scheduler::Placement::Any).unwrap();
         scheduler.resume(idx);
         scheduler.raise(idx, REASON_WAKE);
         wait_until("running", || runner.in_flight[idx as usize].load(Ordering::SeqCst) == 1);
@@ -780,8 +922,8 @@ mod tests {
         let scheduler = Scheduler::new(1);
         let runner = Arc::new(Stuck { hung: Mutex::new(Vec::new()), others: AtomicUsize::new(0) });
         scheduler.start(runner.clone());
-        let (stuck, _) = scheduler.alloc().unwrap();
-        let (other, _) = scheduler.alloc().unwrap();
+        let (stuck, _) = scheduler.alloc(crate::scheduler::Placement::Any).unwrap();
+        let (other, _) = scheduler.alloc(crate::scheduler::Placement::Any).unwrap();
         assert_eq!((stuck, other), (0, 1));
         scheduler.resume(stuck);
         scheduler.resume(other);
@@ -798,8 +940,7 @@ mod tests {
         scheduler.shutdown(Duration::from_secs(1));
     }
 
-    #[test]
-    fn chained_tasks_run_back_to_back_on_one_worker() {
+    fn chained_tasks(placement: Placement) {
         struct Chain {
             order: Mutex<Vec<(u32, String)>>,
             scheduler: Mutex<Option<Arc<Scheduler>>>,
@@ -820,7 +961,7 @@ mod tests {
         let runner = Arc::new(Chain { order: Mutex::new(Vec::new()), scheduler: Mutex::new(Some(scheduler.clone())) });
         scheduler.start(runner.clone());
         for _ in 0..3 {
-            let (idx, _) = scheduler.alloc().unwrap();
+            let (idx, _) = scheduler.alloc(placement).unwrap();
             scheduler.resume(idx);
         }
         scheduler.raise(0, REASON_WAKE);
@@ -830,5 +971,204 @@ mod tests {
         assert!(order.iter().all(|(_, thread)| *thread == order[0].1), "{order:?}");
         *lock(&runner.scheduler) = None;
         scheduler.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn chained_tasks_run_back_to_back_on_one_worker() {
+        chained_tasks(Placement::Any);
+    }
+
+    #[test]
+    fn sticky_chain_runs_back_to_back_on_its_home_worker() {
+        chained_tasks(Placement::Slot(2));
+    }
+
+    #[test]
+    fn home_bits_survive_dispatch_and_allocations_balance_and_release() {
+        let scheduler = Scheduler::new(4);
+        let cells: Vec<_> = (0..8).map(|_| scheduler.alloc(Placement::Balanced).unwrap().0).collect();
+        for (index, idx) in cells.iter().enumerate() {
+            assert_eq!(scheduler.cell(*idx).home(), Some(index % 4));
+        }
+        assert_eq!(scheduler.sticky_counts(), [2, 2, 2, 2]);
+        let (any, _) = scheduler.alloc(Placement::Any).unwrap();
+        assert_eq!(scheduler.cell(any).home(), None);
+        scheduler.raise(cells[2], REASON_OPS | REASON_WAKE);
+        let worker = Worker::new(2, 2);
+        assert!(scheduler.begin_run(cells[2], &worker).is_some());
+        scheduler.resume(cells[2]);
+        scheduler.end_run(cells[2]);
+        assert_eq!(scheduler.cell(cells[2]).home(), Some(2));
+        let (replacement, _) = scheduler.alloc(Placement::Slot(2)).unwrap();
+        scheduler.free(cells[2]);
+        assert_eq!(scheduler.sticky_counts(), [2, 2, 2, 2]);
+        scheduler.free(replacement);
+        assert_eq!(scheduler.sticky_counts(), [2, 2, 1, 2]);
+        let (fresh, _) = scheduler.alloc(Placement::Balanced).unwrap();
+        assert_eq!(scheduler.cell(fresh).home(), Some(2));
+        assert!(scheduler.alloc(Placement::Slot(4)).is_none());
+    }
+
+    #[test]
+    fn only_the_home_worker_serves_a_sticky_lane_when_other_workers_are_idle() {
+        let scheduler = Scheduler::new(4);
+        let runner = CountingRunner::new();
+        scheduler.start(runner.clone());
+        let (idx, _) = scheduler.alloc(Placement::Slot(2)).unwrap();
+        scheduler.resume(idx);
+        for runs in 1..=12 {
+            scheduler.wake(idx);
+            wait_until("sticky lane run", || runner.runs[idx as usize].load(Ordering::SeqCst) == runs);
+            wait_until("idle cell", || scheduler.cell(idx).state.load(Ordering::Acquire) & RUNNING == 0);
+        }
+        assert!(lock(&runner.placements).iter().all(|(_, _, slot)| *slot == 2));
+        scheduler.shutdown(Duration::from_secs(1));
+    }
+
+    struct PendingRunner {
+        scheduler: Arc<Scheduler>,
+        entered: AtomicBool,
+        release: AtomicBool,
+        returned: AtomicBool,
+        limit_ns: i64,
+        runs: Mutex<Vec<(u32, usize, usize)>>,
+    }
+
+    impl Runner for PendingRunner {
+        fn run(&self, idx: u32, _: Taken, worker: &Worker) {
+            lock(&self.runs).push((idx, worker.id, worker.slot));
+            if idx == 0 {
+                worker.guard(idx, self.limit_ns, || {
+                    self.scheduler.raise(1, REASON_WAKE);
+                    self.entered.store(true, Ordering::Release);
+                    while !self.release.load(Ordering::Acquire) {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                });
+                self.returned.store(true, Ordering::Release);
+            }
+        }
+
+        fn hung(&self, idx: u32) {
+            self.scheduler.mark_dead(idx);
+        }
+    }
+
+    fn pending_runner(scheduler: &Arc<Scheduler>, limit_ns: i64) -> Arc<PendingRunner> {
+        Arc::new(PendingRunner {
+            scheduler: scheduler.clone(),
+            entered: AtomicBool::new(false),
+            release: AtomicBool::new(false),
+            returned: AtomicBool::new(false),
+            limit_ns,
+            runs: Mutex::new(Vec::new()),
+        })
+    }
+
+    #[test]
+    fn watchdog_steals_any_run_next_tasks_and_leaves_sticky_tasks_in_place() {
+        for placement in [Placement::Any, Placement::Slot(0)] {
+            let scheduler = Scheduler::new(2);
+            let runner = pending_runner(&scheduler, 5_000_000_000);
+            for placement in [Placement::Slot(0), placement] {
+                let (idx, _) = scheduler.alloc(placement).unwrap();
+                scheduler.resume(idx);
+            }
+            scheduler.start(runner.clone());
+            scheduler.wake(0);
+            wait_until("run-next published", || runner.entered.load(Ordering::Acquire));
+            thread::sleep(Duration::from_millis(20));
+            scheduler.watchdog();
+            if matches!(placement, Placement::Any) {
+                wait_until("stolen task", || lock(&runner.runs).len() == 2);
+                assert_eq!(lock(&runner.runs)[1].2, 1);
+            } else {
+                thread::sleep(Duration::from_millis(20));
+                assert_eq!(lock(&runner.runs).len(), 1);
+            }
+            runner.release.store(true, Ordering::Release);
+            wait_until("both tasks finished", || runner.returned.load(Ordering::Acquire) && lock(&runner.runs).len() == 2);
+            if matches!(placement, Placement::Slot(_)) {
+                let runs = lock(&runner.runs);
+                assert_eq!(runs[0].1, runs[1].1);
+            }
+            scheduler.shutdown(Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn hang_replacement_inherits_the_slot_lane_and_sticky_run_next() {
+        let scheduler = Scheduler::new(2);
+        let runner = pending_runner(&scheduler, 20_000_000);
+        for _ in 0..3 {
+            let (idx, _) = scheduler.alloc(Placement::Slot(0)).unwrap();
+            scheduler.resume(idx);
+        }
+        scheduler.start(runner.clone());
+        scheduler.wake(0);
+        wait_until("stuck with run-next", || runner.entered.load(Ordering::Acquire));
+        scheduler.wake(2); // Pending in the same home lane, rather than the run-next slot.
+        thread::sleep(Duration::from_millis(50));
+        scheduler.watchdog();
+        wait_until("replacement drains both", || lock(&runner.runs).len() == 3);
+        let runs = lock(&runner.runs).clone();
+        assert!(runs.iter().all(|(_, _, slot)| *slot == 0));
+        assert!(runs[1..].iter().all(|(_, id, _)| *id != runs[0].1));
+        assert_eq!(scheduler.worker_counts(), (2, 2, 1));
+        runner.release.store(true, Ordering::Release);
+        wait_until("abandoned call returns", || runner.returned.load(Ordering::Acquire));
+        scheduler.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn surviving_workers_serve_an_orphan_lane() {
+        let scheduler = Scheduler::new(2);
+        let runner = CountingRunner::new();
+        *lock(&scheduler.runner) = Some(runner.clone());
+        scheduler.spawn_worker(0);
+        scheduler.orphan_slot(1);
+        let (idx, _) = scheduler.alloc(Placement::Slot(1)).unwrap();
+        scheduler.resume(idx);
+        scheduler.wake(idx);
+        wait_until("orphan task", || runner.runs[idx as usize].load(Ordering::SeqCst) == 1);
+        assert_eq!(lock(&runner.placements)[0].2, 0);
+        assert_eq!(scheduler.cell(idx).home(), Some(1));
+        scheduler.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_recycled_cell_cannot_run_on_its_former_home_worker() {
+        let scheduler = Scheduler::new(2);
+        let (idx, _) = scheduler.alloc(Placement::Slot(0)).unwrap();
+        scheduler.raise(idx, REASON_OPS);
+        scheduler.free(idx); // Its old lane still has a queue entry.
+        let (fresh, _) = scheduler.alloc(Placement::Slot(1)).unwrap();
+        assert_eq!(fresh, idx);
+        scheduler.raise(fresh, REASON_OPS);
+        let mut streak = 0;
+        let old_worker = Worker::new(0, 0);
+        let new_worker = Worker::new(1, 1);
+        assert_eq!(scheduler.pop_blocking(&old_worker, &mut streak), Some(idx));
+        assert!(scheduler.begin_run(idx, &old_worker).is_none());
+        assert_eq!(scheduler.pop_blocking(&new_worker, &mut streak), Some(idx));
+        assert!(scheduler.begin_run(idx, &new_worker).is_some());
+        assert!(scheduler.begin_run(idx, &new_worker).is_none());
+        scheduler.end_run(idx);
+        assert_eq!(scheduler.cell(idx).home(), Some(1));
+    }
+
+    #[test]
+    fn local_bursts_serve_shared_work_before_more_local_tasks() {
+        let scheduler = Scheduler::new(1);
+        let worker = Worker::new(0, 0);
+        let (sticky, _) = scheduler.alloc(Placement::Slot(0)).unwrap();
+        let (any, _) = scheduler.alloc(Placement::Any).unwrap();
+        scheduler.raise(sticky, REASON_OPS);
+        scheduler.raise(any, REASON_OPS);
+        let mut streak = LOCAL_BURST;
+        assert_eq!(scheduler.pop_blocking(&worker, &mut streak), Some(any));
+        assert_eq!(streak, 0);
+        assert_eq!(scheduler.pop_blocking(&worker, &mut streak), Some(sticky));
+        assert_eq!(streak, 1);
     }
 }

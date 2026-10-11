@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use xgc2_module_host::manifest::Manifest;
+use xgc2_module_host::scheduler::Affinity;
 
 fn parse(text: &str) -> Result<Manifest, String> {
     Manifest::parse(text, Path::new("/etc/xgc2")).map_err(|e| e.to_string())
@@ -33,7 +34,16 @@ out = "c"
 
 #[test]
 fn the_base_manifest_is_valid() {
-    assert!(parse(&with("workers = 2", "workers = 2")).is_ok());
+    let manifest = parse(&with("workers = 2", "workers = 2")).unwrap();
+    assert_eq!(manifest.instance_specs()[0].affinity, Affinity::Sticky);
+}
+
+#[test]
+fn affinity_options_convert_to_instance_requests() {
+    for (text, expected) in [("sticky", Affinity::Sticky), ("any", Affinity::Any)] {
+        let manifest = parse(&with("period_ms = 2", &format!("period_ms = 2\naffinity = \"{text}\""))).unwrap();
+        assert_eq!(manifest.instance_specs()[0].affinity, expected);
+    }
 }
 
 #[test]
@@ -66,6 +76,8 @@ fn each_defect_is_named() {
         (with("period_ms = 2", "period_ms = 2\nhang_limit_ms = 1"), "hang limit must be at least 20 ms"),
         (with("period_ms = 2", "period_ms = 100\nstep_budget_ms = 500\nhang_limit_ms = 100"), "hang limit must be at least"),
         (with("period_ms = 2", "period_ms = \"fast\""), "invalid type"),
+        (with("period_ms = 2", "period_ms = 2\naffinity = \"free\""), "instance \"i\": affinity \"free\" must be \"sticky\" or \"any\""),
+        (with("period_ms = 2", "period_ms = 2\naffinity = 1"), "invalid type"),
         (with("out = \"c\"", "Out = \"c\""), "bind key \"Out\" is not a port name"),
         (with("out = \"c\"", "out = \"not a channel\""), "bind out -> \"not a channel\""),
         (with("out = \"c\"", "out = 3"), "invalid type"),

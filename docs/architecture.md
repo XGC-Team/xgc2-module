@@ -28,7 +28,7 @@ hot-plug, the clock and the control plane. The module ABI itself is `include/xgc
 | `abi.rs` | Rust mirror of `include/xgc2/module.h`; its layout is checked against the C compiler in `tests/abi_layout.rs` |
 | `loader.rs` | sha256 pin, `dlopen`, descriptor validation |
 | `channel.rs` | slot arenas, state and event channels, pins and cursors |
-| `scheduler.rs` | worker pool, per-instance cells, dirty bits, run-next, watchdog |
+| `scheduler.rs` | worker pool, per-instance cells and affinity, worker lanes, dirty bits, run-next, watchdog |
 | `timers.rs` | deadline heap, period timers, external clock hook |
 | `clock.rs`, `metrics.rs`, `log.rs`, `names.rs` | host clock, latency histogram, logger, identifier grammars |
 | `instance.rs`, `api.rs` | one module instance (lifecycle operations, steps, budgets, isolation) and the host function table it gives the module |
@@ -75,9 +75,21 @@ still get the last sample, and the flag shows in `health` (`stale`, `stale_reads
 ## Scheduling
 
 **Instances are serial tasks.** Each instance owns one cell in a fixed, contiguous table, 64-byte aligned: one state
-word (queued, running, paused, dead, plus pending reasons), the input dirty mask, the time of the oldest unprocessed
+word (queued, running, paused, dead, pending reasons and home worker), the input dirty mask, the time of the oldest unprocessed
 commit, and the wake counters. A pool of `workers` threads (default `min(4, cores)`) runs the tasks. An instance never
 runs on two threads at once, and it keeps no thread of its own.
+
+**Affinity.** Each instance defaults to `affinity = "sticky"`: create, configure, start, step, stop and destroy all
+run on its home worker. This supports thread-affine libraries such as xgc2-state-machine (the first update binds a
+machine to that OS thread) and keeps instance data in the worker's caches. The home slot is chosen at add time by
+the fewest sticky instances, lowest slot on ties, without moving existing instances. Stop/start and a hot replacement
+keep the slot. `affinity = "any"` permits migration between workers and retains free dispatch.
+
+One queue mutex protects the shared queue and a lane per pool slot; each slot has its own condition variable.
+Sticky tasks enter their home lane and wake only that worker. Shared tasks wake the longest-parked worker.
+Instances sharing a home worker wait for each other; balanced sticky chains may cross workers at every hop, which
+adds wake-ups and handoff cost. Any affinity lets a chain stay on the worker that made it runnable. The benchmark
+compares these costs in [validation/2026-10-10.md](validation/2026-10-10.md#benchmark).
 
 **Reasons.** A task becomes runnable when a reason is raised on an idle cell:
 
@@ -96,10 +108,11 @@ step cost one step; commits during a step cost one more step, never one per comm
 filtered against what each input still has unread, so a commit that an earlier step already consumed causes no step.
 `health` counts the commits (`input_commits`) and how many of them were absorbed (`coalesced_dirties`).
 
-**Run-next.** A task made runnable from inside a worker is placed in that worker's run-next slot instead of the shared
-queue. A chain producer, stage, sink therefore runs back to back on one thread without a thread wake-up. A worker takes
-at most 8 run-next tasks in a row before it serves the shared queue, and the watchdog moves a run-next task to the
-shared queue when its worker has been busy for more than 2 ms. Commit as the last thing in a step.
+**Run-next.** A task made runnable from inside a worker can use its run-next slot when it has any affinity or that
+worker is its home. A co-located sticky chain, or an any-affinity chain, therefore runs back to back without a worker
+wake-up. Workers take run-next, then their own lane, then the shared queue; after 8 local tasks they serve shared
+work first. The watchdog moves only any-affinity run-next tasks to the shared queue when their worker has been busy
+for more than 2 ms. Sticky tasks stay on their home worker. Commit as the last thing in a step.
 
 **Timers.** One thread keeps a deadline heap. A period timer fires at `anchor + n * period` without drift. When the
 host fell behind, the skipped periods are counted (`missed_periods`) and the next deadline lies in the future: a slow
@@ -116,8 +129,10 @@ at least 100 ms; lifecycle calls at least 5 s) is abandoned:
 
 1. the instance becomes `isolated`: its cell is dead, queued operations fail, its readers and pins are released, a
    pending event claim is voided and its outputs are flagged stale;
-2. the pool starts a replacement worker, so the other instances keep their parallelism (`workers.abandoned` counts
-   the stuck ones);
+2. the pool starts a replacement worker in the same slot, inheriting its lane and pending run-next tasks. Co-located
+   sticky instances resume there; the OS thread changes once, counted by their `worker_moves`. Other slots and shared
+   tasks keep running while that slot is stuck (`workers.abandoned` counts the stuck threads). If spawning the
+   replacement fails, surviving workers may serve its orphaned lane;
 3. the library is pinned: it cannot be unloaded, and removing the isolated instance does not call into the module
    (the instance record is deliberately kept alive, because the stuck thread, or a thread of the module, may still
    touch it).
@@ -162,8 +177,10 @@ Control operations are serialized with each other; a second one is refused with 
 | rebind a port | quiesce, check the new channel against the port, move the binding; an input of a running instance attaches to the new channel at once. |
 | live configure | queued on the instance; the module applies the JSON between two steps. Period and budgets change without involving the module. |
 
-Replacing keeps the channel slots, so consumers see one uninterrupted sequence of samples; only the replaced
-instance misses the steps between its stop and its start.
+Replacing keeps the channel slots and, for sticky affinity, the home worker, so consumers see one uninterrupted
+sequence of samples; only the replaced instance misses the steps between its stop and its start. An explicit
+`affinity` in `instances/replace` can change it; omission preserves the current affinity. Switching from any to
+sticky selects the least-loaded slot at replacement time.
 
 ## Control plane
 
@@ -181,18 +198,22 @@ running producer, and an external clock has published. The reasons are listed un
 ## Observability
 
 No line is logged per step. `GET /v1/health` reports, per instance: state and health, the module's own `report`
-detail, `steps`, `step_time` (count, p50, p99, max in ns), `handoff_latency` (oldest unprocessed input commit to step
+detail, `affinity`, `worker` (pool slot), `worker_moves` (runs on a different worker identity from the preceding run),
+`steps`, `step_time` (count, p50, p99, max in ns), `handoff_latency` (oldest unprocessed input commit to step
 start), `wakeups` (`wake()` calls), `input_commits`, `coalesced_dirties`, `timer_fires`, `missed_periods`, `overruns`,
 `step_errors`, `spurious_wakeups` and `misuse` (calls against the API contract, such as a second `write_begin`); per
 channel: `commits`, `drops`, `stale`, `stale_reads`, `lag`, readers and writers; and the worker pool
-(`configured`, `live`, `abandoned`). Percentiles come from log-linear histograms with at most 12.5% error.
+(`configured`, `live`, `abandoned`, `sticky`: sticky instance counts by slot). `describe` includes each instance's
+affinity, worker slot and moves too. Percentiles come from log-linear histograms with at most 12.5% error.
 
 ## Module author notes
 
-* All lifecycle calls and `step` run on host worker threads, never concurrently for one instance. Reads
+* All lifecycle calls and `step` run on the same host worker under the default sticky affinity, never concurrently
+  for one instance. Hang recovery changes the OS thread; any affinity permits migration during normal operation. Reads
   (`read_latest`, `read_next`, `changed`) are valid only inside `step`; the views are borrowed until it returns.
-* **Commit as the last thing in a step** and keep steps short: the consumer runs right after the producer's step on the
-  same thread. Do not block on another module and do not wait for input in a step; use `wake()` to hand work back.
+* **Commit as the last thing in a step** and keep steps short: an eligible consumer can run right after the producer
+  on the same worker through run-next. Do not block on another module and do not wait for input in a step; use
+  `wake()` to hand work back.
 * A thread that a module owns may call `wake`, `now_ns`, `log`, `report` and `set_period_ns` at any time and the write calls on ports flagged
   `XGC2_PORT_ASYNC_WRITER` (one writer thread per port). Stop the threads in `stop`; nothing may call the host after
   `destroy` returns.

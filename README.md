@@ -51,7 +51,9 @@ xgc2-module-host --manifest entity.toml --check     # load the libraries, plan t
 
 The manifest (see [docs/manifest.md](docs/manifest.md) and [docs/examples/entity.toml](docs/examples/entity.toml))
 names the entity, the clock, the module libraries (with an optional sha256 pin), and the instances with their
-configuration, period, step budgets and port-to-channel bindings. The process runs until SIGINT or SIGTERM. When a
+configuration, period, step budgets, affinity and port-to-channel bindings. Affinity defaults to `"sticky"`: all
+lifecycle calls and steps stay on one pool worker for thread-affine libraries and cache locality. `"any"` permits
+migration and lets input chains use run-next across instances with fewer worker wake-ups. The process runs until SIGINT or SIGTERM. When a
 control socket is configured, [`GET /v1/describe`](docs/control-api.md) answers whether the entity is ready and the
 other endpoints change it live.
 
@@ -65,7 +67,7 @@ and alignment of a plain struct), implement `create`, `configure`, `start`, `ste
 ```bash
 cargo build --release                  # target/release/xgc2-module-host
 cargo test                             # unit tests and integration tests with real C modules (needs cc and c++)
-cargo bench --bench handoff            # handoff latency and CPU of a 3-module chain at 500 Hz
+cargo bench --bench handoff            # handoff latency and CPU of a 3-module chain at 500 Hz, sticky and any
 scripts/bionic-test.sh                 # the same tests against glibc 2.27, on the glibc 2.27 loader
 python3 sdk/tests/test_sdk.py --work-dir /tmp/sdk-check    # the SDK as a module author consumes it
 ```

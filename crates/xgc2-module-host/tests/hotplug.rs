@@ -74,7 +74,7 @@ fn replacing_an_instance_under_load_does_not_disturb_the_others() {
     for round in 0..20 {
         let module = if round % 2 == 0 { "pass_2" } else { "pass_1" };
         let started = Instant::now();
-        f.host.replace_instance("stage", Some(module), None).unwrap_or_else(|e| panic!("round {round}: {e}"));
+        f.host.replace_instance("stage", Some(module), None, None).unwrap_or_else(|e| panic!("round {round}: {e}"));
         longest_swap = longest_swap.max(started.elapsed());
         let version = if round % 2 == 0 { 2 } else { 1 };
         wait_until("replacement steps", Duration::from_secs(5), || f.detail("stage")["version"] == version);
@@ -103,8 +103,14 @@ fn the_event_backlog_moves_to_the_replacement() {
     let f = Fixture::new("backlog");
     f.load_module("producer_event");
     f.load_module("consumer");
-    f.add(spec("consumer", "consumer", 0.0, r#"{"work_us":150000}"#, &[("event_in", "bus")]));
-    f.add(spec("producer", "producer_event", 10.0, r#"{"burst":3}"#, &[("out", "bus")]));
+    // Preserve this test's free-dispatch setup: replacement create must finish while the
+    // old consumer is in its first slow step, before it can drain the measured backlog.
+    let mut consumer = spec("consumer", "consumer", 0.0, r#"{"work_us":150000}"#, &[("event_in", "bus")]);
+    consumer.affinity = xgc2_module_host::scheduler::Affinity::Any;
+    f.add(consumer);
+    let mut producer = spec("producer", "producer_event", 10.0, r#"{"burst":3}"#, &[("out", "bus")]);
+    producer.affinity = xgc2_module_host::scheduler::Affinity::Any;
+    f.add(producer);
     // The consumer is inside its first (slow) step once it has reported; later events pile up.
     wait_until("first step", Duration::from_secs(5), || count(&f.detail("consumer")["events"]) > 0);
     sleep_ms(35);
@@ -112,7 +118,7 @@ fn the_event_backlog_moves_to_the_replacement() {
     let sent = count(&f.detail("producer")["sent"]);
     let seen_by_old = count(&f.detail("consumer")["events"]);
     assert!(seen_by_old < sent, "the test needs unread events: {seen_by_old} of {sent}");
-    f.host.replace_instance("consumer", None, None).unwrap();
+    f.host.replace_instance("consumer", None, None, None).unwrap();
     wait_until("replacement reads the backlog", Duration::from_secs(5), || count(&f.detail("consumer")["events"]) > 0);
     // Exactly the events the old instance had not read; no loss, no duplicate.
     assert_eq!(count(&f.detail("consumer")["events"]), sent - seen_by_old);
@@ -126,7 +132,7 @@ fn a_replacement_that_does_not_fit_is_refused_and_the_old_instance_keeps_running
     f.load_module("slow");
     f.load_module("producer_event");
     wait_until("flowing", Duration::from_secs(10), || count(&f.detail("ca")["state_updates"]) > 5);
-    let refused = |module: &str| match f.host.replace_instance("stage", Some(module), None) {
+    let refused = |module: &str| match f.host.replace_instance("stage", Some(module), None, None) {
         Err(HostError::Invalid(message)) => message,
         other => panic!("expected a refusal for {module}, got {other:?}"),
     };
@@ -149,7 +155,7 @@ fn a_replacement_that_cannot_start_restores_the_previous_instance() {
     two_chains(&f);
     wait_until("flowing", Duration::from_secs(10), || count(&f.detail("ca")["state_updates"]) > 5);
     for (config, phase) in [(r#"{"fail_start":1}"#, "start"), (r#"{"fail_create":1}"#, "create")] {
-        let error = f.host.replace_instance("stage", Some("pass_2"), Some(config.into())).unwrap_err();
+        let error = f.host.replace_instance("stage", Some("pass_2"), Some(config.into()), None).unwrap_err();
         let text = error.to_string();
         assert!(text.contains(phase), "{text}");
         if phase == "start" {

@@ -219,7 +219,7 @@ mod tests {
         }
 
         fn instance(&self, period_ns: i64) -> (u32, u32) {
-            let (idx, generation) = self.sched.alloc().unwrap();
+            let (idx, generation) = self.sched.alloc(crate::scheduler::Placement::Any).unwrap();
             self.sched.resume(idx);
             self.timers.arm(idx, generation, period_ns);
             (idx, generation)

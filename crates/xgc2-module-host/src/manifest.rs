@@ -36,7 +36,7 @@ use crate::clock::Mode;
 use crate::host::{check_limits, effective_limits, ClockSpec, HostOptions, InstanceSpec};
 use crate::names;
 use crate::plan::{Hint, MAX_READERS_LIMIT};
-use crate::scheduler::MAX_INSTANCES;
+use crate::scheduler::{Affinity, MAX_INSTANCES};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -107,6 +107,7 @@ pub struct ChannelSection {
 pub struct InstanceSection {
     pub name: String,
     pub module: String,
+    pub affinity: Option<String>,
     pub period_ms: Option<f64>,
     pub step_budget_ms: Option<f64>,
     pub hang_limit_ms: Option<f64>,
@@ -261,6 +262,11 @@ impl Manifest {
             if !seen.contains(instance.module.as_str()) {
                 note(format!("{who}: module {:?} is not declared", instance.module));
             }
+            if let Some(affinity) = &instance.affinity {
+                if affinity != "sticky" && affinity != "any" {
+                    note(format!("{who}: affinity {affinity:?} must be \"sticky\" or \"any\""));
+                }
+            }
             let mut timing_ok = true;
             for (key, value) in
                 [("period_ms", instance.period_ms), ("step_budget_ms", instance.step_budget_ms), ("hang_limit_ms", instance.hang_limit_ms)]
@@ -335,6 +341,7 @@ impl Manifest {
                 InstanceSpec {
                     name: section.name.clone(),
                     module: section.module.clone(),
+                    affinity: if section.affinity.as_deref() == Some("any") { Affinity::Any } else { Affinity::Sticky },
                     config_json: config.to_string(),
                     period_ns: period,
                     step_budget_ns: budget,

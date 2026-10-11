@@ -42,6 +42,7 @@ depth = 32                              # event queue length, at least what any 
 [[instance]]
 name = "controller"
 module = "controller"
+affinity = "sticky"                    # default: keep lifecycle calls and steps on one pool worker; "any" permits migration
 period_ms = 2                           # 500 Hz timer; omit for an instance driven by its inputs only
 step_budget_ms = 1.5                    # default: one period (50 ms without a period)
 hang_limit_ms = 200                     # default: ten budgets, at least 100 ms
