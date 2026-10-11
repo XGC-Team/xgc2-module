@@ -81,14 +81,19 @@ def main():
     work.mkdir(parents=True, exist_ok=False)
     checks = []
 
-    def run(*command, success=True):
+    def run(*command, success=True, cwd=None):
         command = [str(item) for item in command]
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, cwd=cwd)
         with (work / 'commands.log').open('a') as log:
             log.write(json.dumps(command) + '\n' + result.stdout + '\n')
         if (result.returncode == 0) != success:
             raise AssertionError('unexpected exit {}: {}\n{}'.format(result.returncode, command, result.stdout))
         return result.stdout
+
+    def configure(source, build, *settings, success=True):
+        # CMake 3.10 (Ubuntu 18.04) has no -S/-B, --install or --parallel: configure from the build directory.
+        build.mkdir(parents=True, exist_ok=True)
+        return run('cmake', *settings, source, success=success, cwd=build)
 
     consumer = work / 'consumer'
     consumer.mkdir()
@@ -98,10 +103,10 @@ def main():
 
     def consume(name, settings, success=True):
         build = work / ('consumer-' + name)
-        run('cmake', '-S', consumer, '-B', build, *settings, success=success)
+        configure(consumer, build, *settings, success=success)
         if not success:
             return
-        run('cmake', '--build', build, '--parallel', '1')
+        run('cmake', '--build', build)
         run(build / 'c_smoke')
         run(build / 'cxx_smoke')
         checks.append(name + ': C11 and C++11 smoke builds passed with -Wall -Wextra -Wpedantic -Werror')
@@ -109,8 +114,8 @@ def main():
     if args.prefix is None:
         consume('source tree', ['-DXGC2_MODULE_SOURCE_ROOT=' + str(SOURCE)])
         prefix = work / 'prefix'
-        run('cmake', '-S', SOURCE / 'sdk', '-B', work / 'sdk-build', '-DCMAKE_INSTALL_PREFIX=' + str(prefix))
-        run('cmake', '--install', work / 'sdk-build')
+        configure(SOURCE / 'sdk', work / 'sdk-build', '-DCMAKE_INSTALL_PREFIX=' + str(prefix))
+        run('cmake', '--build', work / 'sdk-build', '--target', 'install')
     else:
         prefix = args.prefix.resolve()
     expected = {'include/xgc2/module.h'} | {'share/cmake/Xgc2Module/' + name for name in
@@ -132,8 +137,8 @@ def main():
     header.unlink()
     try:
         build = work / 'consumer-missing-header'
-        run('cmake', '-S', consumer, '-B', build, '-DSDK_PREFIX=' + str(relocated), '-DSDK_VERSION=' + VERSION)
-        run('cmake', '--build', build, '--parallel', '1', success=False)
+        configure(consumer, build, '-DSDK_PREFIX=' + str(relocated), '-DSDK_VERSION=' + VERSION)
+        run('cmake', '--build', build, success=False)
     finally:
         header.write_bytes(original)
     (relocated / 'share/cmake/Xgc2Module/Xgc2ModuleConfig.cmake').unlink()
