@@ -4,8 +4,13 @@ mod common;
 
 use common::*;
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::io::{self, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+use xgc2_module_host::clock::Mode;
 use xgc2_module_host::control::ControlServer;
+use xgc2_module_host::host::{ClockSpec, HostOptions};
 use xgc2_xrpc::{BlockingClient, CallError, Method, Runtime, RuntimeOptions};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,10 +26,14 @@ struct Control {
 
 impl Control {
     fn new() -> Control {
+        Self::with(|_| {})
+    }
+
+    fn with(tweak: impl FnOnce(&mut HostOptions)) -> Control {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::Builder::new().permissions(std::fs::Permissions::from_mode(0o700)).tempdir().unwrap();
         let socket = dir.path().join("module.sock");
-        let fixture = Fixture::new("control-test");
+        let fixture = Fixture::with("control-test", tweak);
         let server = ControlServer::start(fixture.host.clone(), &socket).expect("control server");
         let runtime = Runtime::new(RuntimeOptions::default()).unwrap();
         let client = BlockingClient::unix(&runtime, &socket, server.instance_id()).unwrap();
@@ -38,6 +47,29 @@ impl Control {
 
     fn get(&self, path: &str) -> Value {
         self.client.request(Method::GET, path, None, TIMEOUT, None).unwrap_or_else(|e| panic!("GET {path}: {e}"))
+    }
+
+    /// The SDK client rejects query strings; use a native unbound HTTP exchange.
+    fn describe(&self, target: &str, budget: Duration) -> io::Result<(u16, Value)> {
+        let mut stream = UnixStream::connect(self.server.as_ref().unwrap().socket())?;
+        stream.set_read_timeout(Some(budget + Duration::from_secs(1)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+        write!(
+            stream,
+            "GET {target} HTTP/1.1\r\nHost: local\r\nConnection: close\r\nX-Request-ID: describe:test\r\nX-Xrpc-Timeout-Ms: {}\r\n\r\n",
+            budget.as_millis()
+        )?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        let (headers, body) =
+            response.split_once("\r\n\r\n").ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no describe response"))?;
+        let status = headers
+            .split_whitespace()
+            .nth(1)
+            .and_then(|status| status.parse().ok())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid HTTP status"))?;
+        let body = serde_json::from_str(body).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok((status, body))
     }
 
     fn ok(&self, path: &str, body: Value) -> Value {
@@ -65,6 +97,33 @@ fn failure(error: CallError) -> (String, String) {
         Some(code) => (code.to_owned(), body["error"]["message"].as_str().unwrap_or("").to_owned()),
         None => ("transport".to_owned(), error.message),
     }
+}
+
+/// Both unbound discovery calls must stay held until the change makes the host ready.
+fn describe_when_ready(c: &Control, change: impl FnOnce()) -> Value {
+    assert!(!c.fixture.host.is_ready());
+    std::thread::scope(|scope| {
+        let (done, replies) = mpsc::channel();
+        for _ in 0..2 {
+            let done = done.clone();
+            scope.spawn(move || {
+                let result = c.describe("/v1/describe?wait_ready_ms=30000", Duration::from_secs(3));
+                let _ = done.send(result);
+            });
+        }
+        drop(done);
+        assert!(matches!(replies.recv_timeout(Duration::from_millis(100)), Err(mpsc::RecvTimeoutError::Timeout)));
+        change();
+        let mut described = Value::Null;
+        for _ in 0..2 {
+            let (status, body) = replies.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+            assert_eq!(status, 200, "{body}");
+            described = body;
+            assert_eq!(described["ready"], true);
+            assert_eq!(described["instance_id"], c.server.as_ref().unwrap().instance_id());
+        }
+        described
+    })
 }
 
 #[test]
@@ -240,10 +299,116 @@ fn readiness_follows_started_instances_and_their_producers() {
     assert_eq!((stage["state"].as_str(), stage["ready"].as_bool()), (Some("running"), Some(false)));
     c.ok("/v1/instances/add", json!({"name": "src", "module": "producer", "bind": {"out": "raw"}, "autostart": false}));
     assert_eq!(described(&c)["ready"], false, "a producer that is not started does not count");
-    c.ok("/v1/instances/start", json!({"name": "src"}));
-    assert_eq!(described(&c)["ready"], true);
+    let ready = describe_when_ready(&c, || {
+        c.ok("/v1/instances/start", json!({"name": "src"}));
+    });
+    assert!(ready["facts"]["instances"].as_array().unwrap().iter().all(|instance| instance["state"] == "running"));
+    c.ok("/v1/bindings", json!({"instance": "stage", "port": "in", "channel": null}));
+    describe_when_ready(&c, || {
+        c.ok("/v1/bindings", json!({"instance": "stage", "port": "in", "channel": "raw"}));
+    });
     c.ok("/v1/instances/stop", json!({"name": "src"}));
     assert_eq!(described(&c)["ready"], false);
+    let empty = describe_when_ready(&c, || {
+        c.ok("/v1/instances/remove", json!({"name": "src"}));
+        assert!(!c.fixture.host.is_ready());
+        c.ok("/v1/instances/remove", json!({"name": "stage"}));
+    });
+    assert_eq!(empty["facts"]["instances"], json!([]));
+}
+
+#[test]
+fn describe_wait_is_released_by_the_first_external_clock_sample() {
+    let c = Control::with(|options| {
+        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()) };
+    });
+    c.ok("/v1/modules/load", json!({"path": c.path_of("sim_clock"), "name": "clock"}));
+    c.ok(
+        "/v1/instances/add",
+        json!({"name": "clock", "module": "clock", "autostart": false, "required": false,
+               "config": {"interval_us": 100000, "count": 1}, "bind": {"time": "clock"}}),
+    );
+    let described = describe_when_ready(&c, || {
+        c.ok("/v1/instances/start", json!({"name": "clock"}));
+    });
+    assert_eq!(described["facts"]["clock"]["valid"], true);
+    assert_eq!(described["facts"]["clock"]["now_ns"], 10_000_000);
+}
+
+#[test]
+fn describe_is_immediate_when_ready_or_without_a_wait() {
+    let ready = Control::new();
+    for target in ["/v1/describe?wait_ready_ms=0", "/v1/describe?wait_ready_ms=30000"] {
+        let (status, described) = ready.describe(target, Duration::from_secs(1)).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(described["ready"], true);
+    }
+    let not_ready = Control::with(|options| {
+        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()) };
+    });
+    for target in ["/v1/describe", "/v1/describe?wait_ready_ms=0"] {
+        let (status, described) = not_ready.describe(target, Duration::from_secs(1)).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(described["ready"], false);
+    }
+}
+
+#[test]
+fn describe_wait_expires_with_the_current_not_ready_body() {
+    let c = Control::with(|options| {
+        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()) };
+    });
+    let started = Instant::now();
+    let (status, described) = c.describe("/v1/describe?wait_ready_ms=120", Duration::from_secs(2)).unwrap();
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(120) && elapsed < Duration::from_secs(1), "{elapsed:?}");
+    assert_eq!(status, 200);
+    assert_eq!(described["ready"], false);
+    assert_eq!(described["facts"]["clock"]["valid"], false);
+    assert_eq!(described["facts"]["not_ready"], json!(["the external clock has not published a time yet"]));
+}
+
+#[test]
+fn describe_wait_is_bounded_by_the_request_deadline() {
+    let c = Control::with(|options| {
+        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()) };
+    });
+    let started = Instant::now();
+    let response = c.describe("/v1/describe?wait_ready_ms=30000", Duration::from_millis(120));
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(100) && elapsed < Duration::from_secs(1), "{elapsed:?}");
+    match response {
+        Ok((status, body)) => {
+            assert_eq!(status, 504, "{body}");
+            assert_eq!(body["error"]["code"], "deadline_exceeded");
+        }
+        Err(error) => assert!(
+            matches!(error.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe),
+            "{error}"
+        ),
+    }
+}
+
+#[test]
+fn describe_rejects_invalid_wait_queries_even_when_ready() {
+    let c = Control::new();
+    for query in [
+        "wait_ready_ms=",
+        "wait_ready_ms=abc",
+        "wait_ready_ms=-1",
+        "wait_ready_ms=+1",
+        "wait_ready_ms=1.5",
+        "wait_ready_ms=30001",
+        "wait_ready_ms=18446744073709551616",
+        "wait_ready_ms=1&wait_ready_ms=2",
+        "wait_ready_ms=1&other=2",
+        "other=1",
+    ] {
+        let target = format!("/v1/describe?{query}");
+        let (status, body) = c.describe(&target, TIMEOUT).unwrap();
+        assert_eq!(status, 400, "{target}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_argument", "{target}");
+    }
 }
 
 #[test]

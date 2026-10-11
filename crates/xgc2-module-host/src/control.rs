@@ -1,7 +1,7 @@
 //! Control plane: XRPC http.v1 over a Unix socket.
 //!
 //! ```text
-//! GET  /v1/describe              identity, entity, readiness (the only call without instance fencing)
+//! GET  /v1/describe              identity, entity, readiness; optional wait_ready_ms=0..30000 (unbound)
 //! GET  /v1/health                counters per instance and channel
 //! GET  /v1/modules               loaded libraries
 //! POST /v1/modules/load          {path, name?, sha256?}
@@ -315,5 +315,72 @@ fn perform(host: &ModuleHost, operation: Operation) -> Result<Value, HostError> 
         Operation::Bind(bind) => host
             .bind_port(&bind.instance, &bind.port, bind.channel.as_deref())
             .map(|()| json!({"instance": bind.instance, "port": bind.port, "channel": bind.channel})),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clock::Mode;
+    use crate::host::{ClockSpec, HostOptions};
+    use std::io::Write;
+    use std::net::Shutdown;
+    use std::os::unix::{fs::PermissionsExt, net::UnixStream};
+    use std::time::Instant;
+
+    struct Fixture {
+        host: ModuleHost,
+        server: Option<ControlServer>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let Some(server) = self.server.take() {
+                let _ = server.close();
+            }
+            self.host.shutdown();
+        }
+    }
+
+    fn wait_for_waiters(host: &ModuleHost, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while host.core.readiness_changed.receiver_count() != count {
+            assert!(Instant::now() < deadline, "readiness waiter count did not become {count}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn cancelled_and_dropped_describe_requests_leave_no_waiters() {
+        let dir = tempfile::Builder::new().permissions(std::fs::Permissions::from_mode(0o700)).tempdir().unwrap();
+        let socket = dir.path().join("module.sock");
+        let mut options = HostOptions::new("readiness-test");
+        options.workers = 1;
+        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()) };
+        let host = ModuleHost::start(options).unwrap();
+        let server = ControlServer::start(host.clone(), &socket).unwrap();
+        let mut fixture = Fixture { host, server: Some(server), _dir: dir };
+        assert_eq!(fixture.host.core.readiness_changed.receiver_count(), 0);
+        for cancel in [false, true] {
+            let mut stream = UnixStream::connect(&socket).unwrap();
+            stream
+                .write_all(b"GET /v1/describe?wait_ready_ms=30000 HTTP/1.1\r\nHost: local\r\nX-Request-ID: readiness:drop\r\nX-Xrpc-Timeout-Ms: 30000\r\n\r\n")
+                .unwrap();
+            wait_for_waiters(&fixture.host, 1);
+            if cancel {
+                stream.shutdown(Shutdown::Both).unwrap();
+            }
+            drop(stream);
+            wait_for_waiters(&fixture.host, 0);
+        }
+        // Closing the owner also cancels a held request and releases its receiver.
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream
+            .write_all(b"GET /v1/describe?wait_ready_ms=30000 HTTP/1.1\r\nHost: local\r\nX-Request-ID: readiness:close\r\nX-Xrpc-Timeout-Ms: 30000\r\n\r\n")
+            .unwrap();
+        wait_for_waiters(&fixture.host, 1);
+        fixture.server.take().unwrap().close().unwrap();
+        assert_eq!(fixture.host.core.readiness_changed.receiver_count(), 0);
     }
 }

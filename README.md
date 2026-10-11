@@ -54,7 +54,8 @@ names the entity, the clock, the module libraries (with an optional sha256 pin),
 configuration, period, step budgets, affinity and port-to-channel bindings. Affinity defaults to `"sticky"`: all
 lifecycle calls and steps stay on one pool worker for thread-affine libraries and cache locality. `"any"` permits
 migration and lets input chains use run-next across instances with fewer worker wake-ups. The process runs until SIGINT or SIGTERM. When a
-control socket is configured, [`GET /v1/describe`](docs/control-api.md) answers whether the entity is ready and the
+control socket is configured, [`GET /v1/describe`](docs/control-api.md) answers whether the entity is ready; the optional
+`wait_ready_ms=0..30000` query holds an unbound request until readiness or the wait expires, within its XRPC deadline. The
 other endpoints change it live.
 
 Writing a module: include `<xgc2/module.h>`, describe the ports (name, direction, `state` or `event`, schema id, size
@@ -82,8 +83,9 @@ for one invocation:
 cargo test --config 'patch."https://github.com/XGC-Team/xgc2-xrpc".xgc2-xrpc.path="/path/to/xrpc/rust"'
 ```
 
-The host uses only `Runtime`, `Host::bind`, `handler`, `Fault`, `Limits::default()`, `new_instance_id` (and
-`BlockingClient` in its tests), so bumping the pin needs no code change.
+The host uses `Runtime`/`RuntimeOptions`, `Host::bind`, `handler`, `Context` (`query`, `deadline`, `blocking`),
+`Fault`, `Limits`, `Method`, `new_instance_id` and `BlockingClient` in its tests. Tokio watch notifications and
+timers implement the describe readiness wait.
 
 ## Packages
 

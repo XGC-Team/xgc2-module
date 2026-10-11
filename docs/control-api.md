@@ -30,6 +30,15 @@ Reads never wait for a module. Mutations are serialized: while one runs, another
 | `GET /v1/health` | `entity`, `uptime_ms`, `clock`, `workers` (`configured`, `live`, `abandoned`, `sticky`: sticky instance counts by slot), `instances` (state, health, affinity, worker, worker_moves, the module's `reported` detail, `last_error`, timing, `steps`, `step_time`, `handoff_latency`, `wakeups`, `input_commits`, `coalesced_dirties`, `timer_fires`, `missed_periods`, `overruns`, `step_errors`, `spurious_wakeups`, `misuse`, `ports` with their channel), `channels` (kind, schema, size, depth, readers, writers, `commits`, `drops`, `stale`, `stale_reads`, `lag`, `stalls`). |
 | `GET /v1/modules` | the loaded libraries: handle, name, version, path, sha256, ABI, ports, the instances that use them, `pinned`. |
 
+`GET /v1/describe?wait_ready_ms=N` optionally holds the request while the host is not ready. `N` is an unsigned
+decimal integer from 0 to 30000; malformed values, values above 30000 and other query parameters are
+`invalid_argument`. Without the query, with `N=0`, or when already ready, describe answers immediately.
+Otherwise it waits asynchronously for readiness or the specified time, then returns the current describe body.
+The XRPC request deadline still bounds the call; deadline expiry uses the SDK's deadline error behavior, and
+cancellation drops the wait. This query needs no instance id, so Core can keep one outstanding discovery call
+before learning the instance. Readiness keeps the existing conditions: every required instance is running,
+its required inputs have running producers, and an external clock has published its first sample.
+
 Instance `state` is one of `new`, `created`, `starting`, `running`, `stopping`, `stopped`, `failed`, `isolated`;
 `health` is `ok`, `degraded` (over budget, or reported by the module) or `failed`.
 
