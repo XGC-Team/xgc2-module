@@ -23,8 +23,11 @@ output="$(cd "$output" && pwd -P)"
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
 
-cmake -S "$root/sdk" -B "$work/build" -DCMAKE_INSTALL_PREFIX=/usr > /dev/null
-DESTDIR="$work/package" cmake --install "$work/build" > /dev/null
+# CMake 3.10 (Ubuntu 18.04) has neither -S/-B nor --install: configure from the build directory and
+# install through the build tool.
+mkdir -p "$work/build"
+(cd "$work/build" && cmake "$root/sdk" -DCMAKE_INSTALL_PREFIX=/usr > /dev/null)
+DESTDIR="$work/package" cmake --build "$work/build" --target install > /dev/null
 mkdir -p "$work/package/DEBIAN"
 cat > "$work/package/DEBIAN/control" <<CONTROL
 Package: $package
