@@ -10,9 +10,10 @@ license = "Apache-2.0"
 repository = "https://github.com/XGC-Team/xgc2-module"
 
 [workspace.dependencies]
-# Control plane: XRPC http.v1 over a Unix socket. The host uses Runtime, Host::bind,
-# handler/Fault, Limits::default and (in tests) BlockingClient only.
-xgc2-xrpc = { git = "https://github.com/XGC-Team/xgc2-xrpc", rev = "3e7f4653f42218e7bffaad5752afc5f89690afd2" }
+# Control plane: XRPC http.v1 over a Unix socket. The host uses Runtime/RuntimeOptions,
+# Host::bind, handler, Context::blocking, Fault, Limits, Method and new_instance_id
+# (plus BlockingClient in tests).
+xgc2-xrpc = { git = "https://github.com/XGC-Team/xgc2-xrpc", rev = "ec2953aac4d588e9ff139f1e6a498d04afa8187f" }
 libc = "0.2"
 libloading = "0.8"
 serde = { version = "1", features = ["derive"] }

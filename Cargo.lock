@@ -411,7 +411,6 @@ version = "1.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
 dependencies = [
- "bytes",
  "libc",
  "mio",
  "pin-project-lite",
@@ -551,8 +550,8 @@ dependencies = [
 
 [[package]]
 name = "xgc2-xrpc"
-version = "0.1.0"
-source = "git+https://github.com/XGC-Team/xgc2-xrpc?rev=3e7f4653f42218e7bffaad5752afc5f89690afd2#3e7f4653f42218e7bffaad5752afc5f89690afd2"
+version = "0.2.0"
+source = "git+https://github.com/XGC-Team/xgc2-xrpc?rev=ec2953aac4d588e9ff139f1e6a498d04afa8187f#ec2953aac4d588e9ff139f1e6a498d04afa8187f"
 dependencies = [
  "bytes",
  "http-body-util",
