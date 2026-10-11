@@ -3,6 +3,7 @@
 // is joined in stop(), as the ABI requires. C++ on purpose: it proves the header from C++.
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <thread>
 
