@@ -38,7 +38,7 @@ ownership:
   - /usr/bin/xgc2-module-host
   - /usr/share/doc/xgc2-module-host
 release:
-  repository: XGC-Team/xgc2-module
+  repository: XGC-Team/xgc2-sync-runtime
   ref: main
   ci_workflow: ci.yml
   workflow: release.yml
