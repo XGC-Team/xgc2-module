@@ -1,2 +1,4 @@
 # Xgc2Module @PROJECT_VERSION@: header-only SDK of the xgc2-module module ABI.
 include("${CMAKE_CURRENT_LIST_DIR}/Xgc2ModuleTargets.cmake")
+# The linker version script of a module (exports xgc2_module_entry only).
+set(Xgc2Module_EXPORTS_MAP "${CMAKE_CURRENT_LIST_DIR}/exports.map")

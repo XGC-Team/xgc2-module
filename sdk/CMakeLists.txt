@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
-project(Xgc2Module VERSION 0.2.0 LANGUAGES NONE)
+project(Xgc2Module VERSION 0.3.0 LANGUAGES NONE)
 
-# Header-only SDK: include/xgc2/module.h, the module ABI header of xgc2-module.
+# Header-only SDK: include/xgc2/module.h (the module ABI), include/xgc2/frame.h (the byte frame convention) and the
+# C++ module SDK in sdk/include/xgc2/sdk/ (host.hpp, json_config.hpp, frame.hpp and the in-test host test_host.hpp).
 # Consumers either install the package (find_package(Xgc2Module CONFIG REQUIRED)) or add this
 # directory from their own project (add_subdirectory(<xgc2-module>/sdk)). Both give the
 # imported INTERFACE target Xgc2Module::SDK; there is no library to link.
@@ -12,9 +13,18 @@ add_library(Xgc2Module::SDK ALIAS xgc2_module_sdk)
 set_target_properties(xgc2_module_sdk PROPERTIES EXPORT_NAME SDK)
 target_include_directories(xgc2_module_sdk INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 
-install(FILES ../include/xgc2/module.h DESTINATION include/xgc2)
+# The linker version script every module uses: it exports xgc2_module_entry and nothing else. Consumers read its
+# path from Xgc2Module_EXPORTS_MAP (set by the package file, or here when the SDK is added as a subdirectory).
+get_directory_property(sdk_has_parent PARENT_DIRECTORY)
+if(sdk_has_parent)
+  set(Xgc2Module_EXPORTS_MAP "${CMAKE_CURRENT_SOURCE_DIR}/exports.map" PARENT_SCOPE)
+endif()
+install(FILES exports.map DESTINATION "${sdk_package_dir}")
+install(FILES ../include/xgc2/module.h ../include/xgc2/frame.h DESTINATION include/xgc2)
+install(DIRECTORY include/xgc2/sdk DESTINATION include/xgc2)
 install(TARGETS xgc2_module_sdk EXPORT Xgc2ModuleTargets)
 install(EXPORT Xgc2ModuleTargets NAMESPACE Xgc2Module:: DESTINATION "${sdk_package_dir}")
 

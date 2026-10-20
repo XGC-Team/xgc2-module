@@ -1,0 +1,7 @@
+# A module exports its entry point and nothing else.
+{
+  global:
+    xgc2_module_entry;
+  local:
+    *;
+};

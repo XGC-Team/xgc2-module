@@ -38,8 +38,10 @@ Architecture: all
 Maintainer: XGC2 <apt@example.com>
 Description: xgc2-module SDK: the module ABI header
  Header-only C and C++ SDK for modules of the xgc2-module host. Installs
- <xgc2/module.h> and the Xgc2Module CMake package with the imported
- target Xgc2Module::SDK. No library, no runtime.
+ <xgc2/module.h> (the ABI), <xgc2/frame.h> (byte frames), the C++ module SDK
+ <xgc2/sdk/*.hpp> (host view, JSON configuration, in-test host) and the
+ Xgc2Module CMake package with the imported target Xgc2Module::SDK. No
+ library, no runtime.
 CONTROL
 reproducible "$work/package"
 deb="$output/${package}_${version}_all.deb"

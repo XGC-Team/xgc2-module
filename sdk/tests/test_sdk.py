@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the header-only SDK the way a module author consumes it.
 
-A consumer project includes <xgc2/module.h> from C11 and C++11 and compiles with all warnings
+A consumer project includes <xgc2/module.h> from C11 and the C++ SDK headers from C++14 and compiles with all warnings
 as errors. It is built three ways: from the source tree (add_subdirectory), against an
 installed prefix (find_package) and against a copy of that prefix moved elsewhere. Refused
 cases are checked too: a wrong major version, a missing header and a missing package file.
@@ -18,12 +18,15 @@ import subprocess
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[2]
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 C_SMOKE = r'''
 #include <stddef.h>
 #include <xgc2/module.h>
-_Static_assert(XGC2_MODULE_ABI_MAJOR == 2 && XGC2_MODULE_ABI_MINOR == 0, "ABI version");
+#include <xgc2/frame.h>
+_Static_assert(XGC2_MODULE_ABI_MAJOR == 2 && XGC2_MODULE_ABI_MINOR == 1, "ABI version");
+_Static_assert(offsetof(xgc2_host_api, wake_at_ns) > offsetof(xgc2_host_api, report), "minor 1 entries are appended");
+_Static_assert(sizeof(xgc2_frame256) == 256 && sizeof(xgc2_frame2k) == 2048, "frame classes");
 _Static_assert(XGC2_MODULE_MAX_PORTS == 64, "port capacity");
 _Static_assert(sizeof(xgc2_sample_view) == 32, "sample view layout");
 _Static_assert(sizeof(xgc2_step_ctx) == 32, "step context layout");
@@ -36,9 +39,16 @@ CXX_SMOKE = r'''
 #include <cstddef>
 #include <type_traits>
 #include <xgc2/module.h>
+#include <xgc2/sdk/frame.hpp>
+#include <xgc2/sdk/host.hpp>
+#include <xgc2/sdk/test_host.hpp>
+#if __has_include(<jsoncpp/json/json.h>)
+#include <xgc2/sdk/json_config.hpp>
+#endif
 static_assert(std::is_standard_layout<xgc2_host_api>::value, "host API layout");
 static_assert(sizeof(xgc2_sample_view) == 32, "sample view layout");
 static_assert(XGC2_MODULE_ABI_MAJOR == 2u, "ABI version");
+static_assert(xgc2::sdk::frameCapacity<xgc2_frame2k>() == 2032u, "frame capacity");
 int main() {
   xgc2_module_entry_fn entry = nullptr;
   return entry != nullptr;
@@ -57,6 +67,9 @@ get_target_property(kind Xgc2Module::SDK TYPE)
 if(NOT kind STREQUAL "INTERFACE_LIBRARY")
   message(FATAL_ERROR "Xgc2Module::SDK must stay a header-only INTERFACE target")
 endif()
+if(NOT EXISTS "${Xgc2Module_EXPORTS_MAP}")
+  message(FATAL_ERROR "Xgc2Module_EXPORTS_MAP does not name a file: ${Xgc2Module_EXPORTS_MAP}")
+endif()
 get_target_property(links Xgc2Module::SDK INTERFACE_LINK_LIBRARIES)
 if(links)
   message(FATAL_ERROR "the SDK must not bring libraries: ${links}")
@@ -66,7 +79,7 @@ set_target_properties(c_smoke PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES C
 target_compile_options(c_smoke PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_link_libraries(c_smoke PRIVATE Xgc2Module::SDK)
 add_executable(cxx_smoke cxx_smoke.cpp)
-set_target_properties(cxx_smoke PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+set_target_properties(cxx_smoke PROPERTIES CXX_STANDARD 14 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
 target_compile_options(cxx_smoke PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_link_libraries(cxx_smoke PRIVATE Xgc2Module::SDK)
 '''
@@ -109,7 +122,7 @@ def main():
         run('cmake', '--build', build)
         run(build / 'c_smoke')
         run(build / 'cxx_smoke')
-        checks.append(name + ': C11 and C++11 smoke builds passed with -Wall -Wextra -Wpedantic -Werror')
+        checks.append(name + ': C11 and C++14 smoke builds passed with -Wall -Wextra -Wpedantic -Werror')
 
     if args.prefix is None:
         consume('source tree', ['-DXGC2_MODULE_SOURCE_ROOT=' + str(SOURCE)])
@@ -118,11 +131,17 @@ def main():
         run('cmake', '--build', work / 'sdk-build', '--target', 'install')
     else:
         prefix = args.prefix.resolve()
-    expected = {'include/xgc2/module.h'} | {'share/cmake/Xgc2Module/' + name for name in
-                                           ('Xgc2ModuleConfig.cmake', 'Xgc2ModuleConfigVersion.cmake', 'Xgc2ModuleTargets.cmake')}
+    expected = {'include/xgc2/module.h', 'include/xgc2/frame.h', 'include/xgc2/sdk/host.hpp', 'include/xgc2/sdk/json_config.hpp',
+                'include/xgc2/sdk/frame.hpp', 'include/xgc2/sdk/test_host.hpp'} | {'share/cmake/Xgc2Module/' + name for name in
+                                           ('Xgc2ModuleConfig.cmake', 'Xgc2ModuleConfigVersion.cmake', 'Xgc2ModuleTargets.cmake', 'exports.map')}
     actual = {path.relative_to(prefix).as_posix() for path in prefix.rglob('*') if path.is_file()}
     assert expected <= actual, 'missing files: ' + str(expected - actual)
     assert (prefix / 'include/xgc2/module.h').read_bytes() == (SOURCE / 'include/xgc2/module.h').read_bytes(), 'header differs from the source'
+    for name in ('host', 'json_config', 'frame', 'test_host'):
+        installed = (prefix / 'include/xgc2/sdk' / (name + '.hpp')).read_bytes()
+        assert installed == (SOURCE / 'sdk/include/xgc2/sdk' / (name + '.hpp')).read_bytes(), name + '.hpp differs from the source'
+    for name in ('host', 'json_config', 'frame', 'test_host'):
+        assert (prefix / 'include/xgc2/sdk' / (name + '.hpp')).read_bytes() == (SOURCE / 'sdk/include/xgc2/sdk' / (name + '.hpp')).read_bytes(), name + '.hpp differs from the source'
     for path in (prefix / 'share/cmake/Xgc2Module').iterdir():
         assert str(SOURCE) not in path.read_text(), path.name + ' leaks the source path'
     consume('installed prefix', ['-DSDK_PREFIX=' + str(prefix), '-DSDK_VERSION=' + VERSION])

@@ -22,9 +22,15 @@ MACHINE = {'amd64': 'Advanced Micro Devices X86-64', 'arm64': 'AArch64'}
 
 SDK_FILES = {
     'usr/include/xgc2/module.h',
+    'usr/include/xgc2/frame.h',
+    'usr/include/xgc2/sdk/host.hpp',
+    'usr/include/xgc2/sdk/json_config.hpp',
+    'usr/include/xgc2/sdk/frame.hpp',
+    'usr/include/xgc2/sdk/test_host.hpp',
     'usr/share/cmake/Xgc2Module/Xgc2ModuleConfig.cmake',
     'usr/share/cmake/Xgc2Module/Xgc2ModuleConfigVersion.cmake',
     'usr/share/cmake/Xgc2Module/Xgc2ModuleTargets.cmake',
+    'usr/share/cmake/Xgc2Module/exports.map',
 }
 HOST_FILES = {
     'usr/bin/xgc2-module-host',
