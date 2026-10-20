@@ -80,7 +80,7 @@ pub fn build_file(source_path: &Path, output: &str, defines: &[&str], extra: &[&
 
 /// A test module by its source name (`consumer` builds `tests/modules/consumer.c`).
 pub fn module(name: &str) -> PathBuf {
-    let source = if matches!(name, "wake_thread" | "tro_shaped") { format!("{name}.cpp") } else { format!("{name}.c") };
+    let source = if matches!(name, "wake_thread" | "tro_shaped" | "bench_frame") { format!("{name}.cpp") } else { format!("{name}.c") };
     build(&source, name, &[])
 }
 

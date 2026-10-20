@@ -31,3 +31,7 @@ tempfile.workspace = true
 [[bench]]
 name = "handoff"
 harness = false
+
+[[bench]]
+name = "frame_handoff"
+harness = false
