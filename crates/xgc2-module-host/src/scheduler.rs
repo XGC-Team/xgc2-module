@@ -48,7 +48,8 @@ pub const REASON_INPUT: u32 = 1 << 8;
 pub const REASON_TIMER: u32 = 1 << 9;
 pub const REASON_WAKE: u32 = 1 << 10;
 pub const REASON_OPS: u32 = 1 << 11;
-const REASONS: u32 = REASON_INPUT | REASON_TIMER | REASON_WAKE | REASON_OPS;
+pub const REASON_DEADLINE: u32 = 1 << 12;
+const REASONS: u32 = REASON_INPUT | REASON_TIMER | REASON_WAKE | REASON_OPS | REASON_DEADLINE;
 const HOME_SHIFT: u32 = 16;
 const HOME_ANY: u32 = 0xff;
 const HOME_MASK: u32 = HOME_ANY << HOME_SHIFT;
@@ -388,6 +389,14 @@ impl Scheduler {
     pub fn wake(&self, idx: u32) {
         self.cell(idx).wakes.fetch_add(1, Ordering::Relaxed);
         self.raise(idx, REASON_WAKE);
+    }
+
+    /// A one-shot deadline of the instance was reached.
+    pub fn fire_deadline(&self, idx: u32, generation: u32) {
+        if self.cell(idx).generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        self.raise(idx, REASON_DEADLINE);
     }
 
     // ---- pause / resume --------------------------------------------------------------

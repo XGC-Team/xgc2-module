@@ -13,7 +13,7 @@ use crate::loader::{Dir, Module, PortSpec};
 use crate::log::Level;
 use crate::log_at;
 use crate::metrics::Histogram;
-use crate::scheduler::{Affinity, Scheduler, Taken, Worker, REASON_INPUT, REASON_OPS, REASON_TIMER, REASON_WAKE};
+use crate::scheduler::{Affinity, Scheduler, Taken, Worker, REASON_DEADLINE, REASON_INPUT, REASON_OPS, REASON_TIMER, REASON_WAKE};
 use crate::timers::{Timers, MIN_PERIOD_NS};
 use std::collections::VecDeque;
 use std::ffi::{c_void, CString};
@@ -645,6 +645,14 @@ impl Instance {
         self.env.sched.wake(self.idx);
     }
 
+    /// `wake_at_ns(deadline)`: one step with the deadline reason once the host clock reaches
+    /// `deadline_ns`; a negative value cancels. Honoured only while the instance runs.
+    pub fn wake_at_ns(&self, deadline_ns: i64) {
+        if matches!(self.state(), State::Running | State::Starting) {
+            self.env.timers.arm_deadline(self.idx, self.generation, deadline_ns);
+        }
+    }
+
     pub fn set_period_ns(&self, period_ns: i64) {
         let period_ns = if period_ns <= 0 { 0 } else { period_ns.max(MIN_PERIOD_NS) };
         self.timing.period_ns.store(period_ns, Ordering::Relaxed);
@@ -692,7 +700,7 @@ impl Instance {
         self.fail_with(message);
         self.set_state(State::Failed);
         self.env.sched.pause(self.idx);
-        self.env.timers.disarm(self.idx);
+        self.env.timers.clear(self.idx);
         self.mark_outputs_stale(true);
         self.env.sched.raise(self.idx, REASON_OPS);
     }
@@ -710,7 +718,7 @@ impl Instance {
         *lock(&self.last_error) = Some(message);
         self.set_state(State::Isolated);
         self.env.sched.mark_dead(self.idx);
-        self.env.timers.disarm(self.idx);
+        self.env.timers.clear(self.idx);
         for op in lock(&self.ops).drain(..) {
             op.done.finish(Err(format!("instance is isolated: {reason}")));
         }
@@ -754,7 +762,7 @@ impl Instance {
             configured |= is_configure && result.is_ok();
             op.done.finish(result);
         }
-        let step_reasons = taken.reasons & (REASON_INPUT | REASON_TIMER | REASON_WAKE);
+        let step_reasons = taken.reasons & (REASON_INPUT | REASON_TIMER | REASON_WAKE | REASON_DEADLINE);
         if (step_reasons != 0 || configured) && self.state() == State::Running {
             self.step(taken, step_reasons, worker);
         }
@@ -870,7 +878,7 @@ impl Instance {
                 }
                 self.set_state(State::Stopping);
                 self.env.sched.pause(self.idx);
-                self.env.timers.disarm(self.idx);
+                self.env.timers.clear(self.idx);
                 // A module whose start failed was never started, so it is not stopped either.
                 let status = if self.started.swap(false, Ordering::AcqRel) {
                     // SAFETY: as above.
@@ -939,6 +947,9 @@ impl Instance {
         }
         if step_reasons & REASON_WAKE != 0 {
             reasons |= abi::STEP_WAKE;
+        }
+        if step_reasons & REASON_DEADLINE != 0 {
+            reasons |= abi::STEP_DEADLINE;
         }
         if self.config_applied.swap(false, Ordering::AcqRel) {
             reasons |= abi::STEP_CONFIG;

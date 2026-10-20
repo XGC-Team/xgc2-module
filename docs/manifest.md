@@ -25,8 +25,9 @@ Relative `path` and `socket` values are resolved against the directory of the ma
 
 | Key | Meaning |
 |---|---|
-| `mode` | `"steady"` (default, CLOCK_MONOTONIC) or `"external"`. |
-| `channel` | With `external`: the state channel of schema `xgc2.clock.v1` that carries the time. The module that writes it is bound to this channel like any other. Not allowed with `steady`. |
+| `mode` | `"steady"` (default, CLOCK_MONOTONIC), `"utc"` (CLOCK_REALTIME, the time base hosts share when their clocks are disciplined) or `"external"`. |
+| `channel` | With `external`: the state channel of schema `xgc2.clock.v1` that carries the time. The module that writes it is bound to this channel like any other. Not allowed with `steady` or `utc`. |
+| `phase_t0_ns` | Origin `T0` of the timer grid, nanoseconds of the clock (`utc`: UTC; `external`: simulation time), 0 or more. Period timers then expire at `T0 + k * period`, so entities on different hosts with the same `T0` and period expire at the same instants. `utc` without it uses 0 (multiples of the period). Not allowed with `steady`. |
 
 ## `[control]`
 

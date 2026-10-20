@@ -62,6 +62,9 @@ pub struct ClockSpec {
     pub mode: Mode,
     /// External mode: the state channel that carries the time.
     pub channel: Option<String>,
+    /// Origin of the timer grid in the clock's domain (`utc`: UTC nanoseconds, `external`:
+    /// simulation nanoseconds). `utc` without one uses 0.
+    pub phase_t0_ns: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,7 +84,7 @@ impl HostOptions {
         HostOptions {
             entity: entity.to_owned(),
             workers: default_workers(),
-            clock: ClockSpec { mode: Mode::Steady, channel: None },
+            clock: ClockSpec { mode: Mode::Steady, channel: None, phase_t0_ns: None },
             quiesce_timeout: Duration::from_secs(2),
             op_timeout: Duration::from_secs(10),
             hints: HashMap::new(),
@@ -210,7 +213,10 @@ impl ModuleHost {
         if !names::valid_id(&options.entity) {
             return Err(HostError::Invalid(format!("entity id {:?} must match [A-Za-z0-9._:-]{{1,128}}", options.entity)));
         }
-        let clock = Arc::new(Clock::new(options.clock.mode));
+        if options.clock.phase_t0_ns.is_some() && options.clock.mode == Mode::Steady {
+            return Err(HostError::Invalid("a steady clock has no timer grid; phase_t0_ns needs the utc or external clock".into()));
+        }
+        let clock = Arc::new(Clock::with_phase(options.clock.mode, options.clock.phase_t0_ns));
         let sched = Scheduler::new(options.workers.max(1));
         let timers = Timers::new(sched.clone(), clock.clone(), MAX_INSTANCES);
         let (readiness_changed, _) = watch::channel(());
@@ -583,7 +589,7 @@ impl ModuleHost {
             instance.module.pinned.store(true, Ordering::Release);
             std::mem::forget(instance.clone());
         }
-        self.core.timers.disarm(instance.idx);
+        self.core.timers.clear(instance.idx);
         self.core.sched.free(instance.idx);
         self.core.readiness_changed.send_replace(());
     }

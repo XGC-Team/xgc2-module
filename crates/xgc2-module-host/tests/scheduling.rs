@@ -85,7 +85,7 @@ fn a_module_thread_wakes_its_instance_and_writes_asynchronously() {
 #[test]
 fn external_clock_runs_timers_on_simulated_time() {
     let f = Fixture::with("sim", |options| {
-        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()) };
+        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()), phase_t0_ns: None };
     });
     f.load_module("sim_clock");
     f.load_module("producer_state");

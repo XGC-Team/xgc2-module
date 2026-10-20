@@ -8,7 +8,8 @@
 //! workers = 2                      # default min(4, cores)
 //!
 //! [clock]
-//! mode = "steady"                  # or "external" with channel = "<state channel of xgc2.clock.v1>"
+//! mode = "steady"                  # "utc", or "external" with channel = "<state channel of xgc2.clock.v1>"
+//! # phase_t0_ns = 1760000000000000000   # origin of the timer grid (utc or external)
 //!
 //! [control]
 //! socket = "/run/xgc2/scout1/module.sock"
@@ -78,6 +79,8 @@ pub struct HostSection {
 pub struct ClockSection {
     pub mode: Option<String>,
     pub channel: Option<String>,
+    /// Origin of the timer grid in nanoseconds of the clock (UTC for `utc`).
+    pub phase_t0_ns: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -199,14 +202,21 @@ impl Manifest {
         }
         match (self.clock.mode.as_deref().unwrap_or("steady"), &self.clock.channel) {
             ("steady", None) => {}
-            ("steady", Some(_)) => note("clock.channel is only used with clock.mode = \"external\"".into()),
+            ("steady", Some(_)) | ("utc", Some(_)) => note("clock.channel is only used with clock.mode = \"external\"".into()),
+            ("utc", None) => {}
             ("external", None) => note("clock.mode = \"external\" needs clock.channel".into()),
             ("external", Some(channel)) => {
                 if !names::valid_name(channel) {
                     note(format!("clock.channel {channel:?} is not a valid name"));
                 }
             }
-            (other, _) => note(format!("clock.mode {other:?} is neither \"steady\" nor \"external\"")),
+            (other, _) => note(format!("clock.mode {other:?} is not \"steady\", \"utc\" or \"external\"")),
+        }
+        if self.clock.phase_t0_ns.is_some() && self.clock.mode.as_deref().unwrap_or("steady") == "steady" {
+            note("clock.phase_t0_ns needs clock.mode = \"utc\" or \"external\" (a steady clock has no timer grid)".into());
+        }
+        if self.clock.phase_t0_ns.is_some_and(|t0| t0 < 0) {
+            note("clock.phase_t0_ns must not be negative".into());
         }
         let mut seen = HashSet::new();
         let mut paths = HashSet::new();
@@ -301,10 +311,10 @@ impl Manifest {
     }
 
     pub fn clock_mode(&self) -> Mode {
-        if self.clock.mode.as_deref() == Some("external") {
-            Mode::External
-        } else {
-            Mode::Steady
+        match self.clock.mode.as_deref() {
+            Some("external") => Mode::External,
+            Some("utc") => Mode::Utc,
+            _ => Mode::Steady,
         }
     }
 
@@ -319,7 +329,7 @@ impl Manifest {
         if let Some(ms) = self.host.op_timeout_ms {
             options.op_timeout = Duration::from_millis(ms);
         }
-        options.clock = ClockSpec { mode: self.clock_mode(), channel: self.clock.channel.clone() };
+        options.clock = ClockSpec { mode: self.clock_mode(), channel: self.clock.channel.clone(), phase_t0_ns: self.clock.phase_t0_ns };
         options.hints = self.channel_hints();
         options
     }
@@ -516,6 +526,20 @@ hang_limit_ms = 100
         let manifest = parse("entity = \"a\"\n[clock]\nmode = \"external\"\nchannel = \"sim\"\n").unwrap();
         assert_eq!(manifest.clock_mode(), Mode::External);
         assert_eq!(manifest.host_options().clock.channel.as_deref(), Some("sim"));
+    }
+
+    #[test]
+    fn utc_clock_and_phase_rules() {
+        let manifest = parse("entity = \"a\"\n[clock]\nmode = \"utc\"\nphase_t0_ns = 1760000000000000000\n").unwrap();
+        assert_eq!(manifest.clock_mode(), Mode::Utc);
+        assert_eq!(manifest.host_options().clock.phase_t0_ns, Some(1_760_000_000_000_000_000));
+        assert_eq!(parse("entity = \"a\"\n[clock]\nmode = \"utc\"\n").unwrap().host_options().clock.phase_t0_ns, None);
+        let error = parse("entity = \"a\"\n[clock]\nphase_t0_ns = 5\n").unwrap_err().to_string();
+        assert!(error.contains("a steady clock has no timer grid"), "{error}");
+        let error = parse("entity = \"a\"\n[clock]\nmode = \"utc\"\nchannel = \"c\"\n").unwrap_err().to_string();
+        assert!(error.contains("only used with"), "{error}");
+        let error = parse("entity = \"a\"\n[clock]\nmode = \"utc\"\nphase_t0_ns = -1\n").unwrap_err().to_string();
+        assert!(error.contains("must not be negative"), "{error}");
     }
 
     #[test]

@@ -71,6 +71,7 @@ impl ModuleHost {
             "valid": self.core.clock.valid(),
             "now_ns": self.core.clock.now_ns(),
             "channel": self.core.options.clock.channel,
+            "phase_t0_ns": self.core.clock.grid_origin(),
         })
     }
 

@@ -55,6 +55,8 @@ fn rust_and_c_agree_on_the_layout() {
         offset_of!(HostApi, set_period_ns),
         offset_of!(HostApi, log),
         offset_of!(HostApi, report),
+        offset_of!(HostApi, wake_at_ns),
+        offset_of!(HostApi, phase_t0_ns),
         size_of::<ModuleDesc>(),
         offset_of!(ModuleDesc, abi_minor),
         offset_of!(ModuleDesc, name),
@@ -86,6 +88,7 @@ fn rust_and_c_agree_on_the_layout() {
         STEP_TIMER as usize,
         STEP_WAKE as usize,
         STEP_CONFIG as usize,
+        STEP_DEADLINE as usize,
     ];
     assert_eq!(count, expected.len(), "probe list and expectation list differ in length");
     for (index, (c, rust)) in probe.iter().zip(&expected).enumerate() {

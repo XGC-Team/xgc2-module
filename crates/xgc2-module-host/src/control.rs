@@ -357,7 +357,7 @@ mod tests {
         let socket = dir.path().join("module.sock");
         let mut options = HostOptions::new("readiness-test");
         options.workers = 1;
-        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()) };
+        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()), phase_t0_ns: None };
         let host = ModuleHost::start(options).unwrap();
         let server = ControlServer::start(host.clone(), &socket).unwrap();
         let mut fixture = Fixture { host, server: Some(server), _dir: dir };

@@ -20,7 +20,8 @@
   X(offsetof(xgc2_host_api, read_next)) X(offsetof(xgc2_host_api, changed))                           \
   X(offsetof(xgc2_host_api, now_ns)) X(offsetof(xgc2_host_api, wake))                                 \
   X(offsetof(xgc2_host_api, set_period_ns)) X(offsetof(xgc2_host_api, log))                           \
-  X(offsetof(xgc2_host_api, report))                                                                  \
+  X(offsetof(xgc2_host_api, report)) X(offsetof(xgc2_host_api, wake_at_ns))                           \
+  X(offsetof(xgc2_host_api, phase_t0_ns))                                                             \
   X(sizeof(xgc2_module_desc)) X(offsetof(xgc2_module_desc, abi_minor))                                \
   X(offsetof(xgc2_module_desc, name)) X(offsetof(xgc2_module_desc, version))                          \
   X(offsetof(xgc2_module_desc, ports)) X(offsetof(xgc2_module_desc, port_count))                      \
@@ -31,7 +32,7 @@
   X(XGC2_OK) X(XGC2_ERR_INVALID) X(XGC2_ERR_STATE) X(XGC2_ERR_FULL) X(XGC2_ERR_NODATA)                \
   X(XGC2_ERR_INTERNAL) X(XGC2_PORT_IN) X(XGC2_PORT_OUT) X(XGC2_PORT_STATE) X(XGC2_PORT_EVENT)         \
   X(XGC2_PORT_REQUIRED) X(XGC2_PORT_ASYNC_WRITER) X(XGC2_STEP_INPUT) X(XGC2_STEP_TIMER)               \
-  X(XGC2_STEP_WAKE) X(XGC2_STEP_CONFIG)
+  X(XGC2_STEP_WAKE) X(XGC2_STEP_CONFIG) X(XGC2_STEP_DEADLINE)
 
 #define VALUE(expression) (unsigned long long)(expression),
 

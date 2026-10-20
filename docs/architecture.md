@@ -117,7 +117,14 @@ for more than 2 ms. Sticky tasks stay on their home worker. Commit as the last t
 **Timers.** One thread keeps a deadline heap. A period timer fires at `anchor + n * period` without drift. When the
 host fell behind, the skipped periods are counted (`missed_periods`) and the next deadline lies in the future: a slow
 step never causes a burst of catch-up steps. A module can change its period with `set_period_ns`; 0 disables the
-timer, and the shortest period is 100 microseconds.
+timer, and the shortest period is 100 microseconds. With a timer grid (clock `utc`, or any clock with a `phase_t0_ns`)
+the first expiration after arming is the next point of `T0 + k * period` and every later one stays on the grid, which
+is how entities of different hosts expire together. Besides the period, an instance may hold one one-shot deadline
+(`wake_at_ns`, ABI minor 1): an absolute instant of the host clock that raises one step with `XGC2_STEP_DEADLINE`; a new
+request replaces it, a negative one cancels it, an instant in the past fires at the next clock reading, and a
+re-anchoring of the period timers leaves it alone. A module that must act at instants of its own (the windows of a
+period of a distributed method) requests the next one at the end of every step instead of sleeping in a thread. If the
+wall clock (`utc`) is stepped back the period timers are re-anchored on the grid.
 
 **Step budgets.** Every instance has a step budget (default: one period, or 50 ms without a period). A step over
 budget counts as an overrun and the instance's health becomes `degraded`; the next step within budget clears it. The
@@ -146,7 +153,10 @@ instance; restarting the process is only needed when an operator wants the stuck
 
 `now_ns()`, the step context and period timers share one host clock.
 
-* `steady` (default): CLOCK_MONOTONIC.
+* `steady` (default): CLOCK_MONOTONIC. Comparable inside one process only.
+* `utc`: CLOCK_REALTIME in nanoseconds. Comparable across hosts to the accuracy of their clocks (chrony or PTP); the
+  host neither measures nor gates that. `phase_t0_ns` (optional) is the origin of the timer grid, and `phase_t0_ns()` of
+  the host API tells a module where it is.
 * `external`: one designated state channel of schema `xgc2.clock.v1` (payload: one native-endian `int64_t`, time in
   nanoseconds) carries the time. The entity's ROS edge module publishes it from `/clock` in simulation. Each commit on
   that channel updates `now_ns()` and fires the timers that became due, on the committing thread, so simulated time
@@ -214,7 +224,7 @@ affinity, worker slot and moves too. Percentiles come from log-linear histograms
 * **Commit as the last thing in a step** and keep steps short: an eligible consumer can run right after the producer
   on the same worker through run-next. Do not block on another module and do not wait for input in a step; use
   `wake()` to hand work back.
-* A thread that a module owns may call `wake`, `now_ns`, `log`, `report` and `set_period_ns` at any time and the write calls on ports flagged
+* A thread that a module owns may call `wake`, `wake_at_ns`, `phase_t0_ns`, `now_ns`, `log`, `report` and `set_period_ns` at any time and the write calls on ports flagged
   `XGC2_PORT_ASYNC_WRITER` (one writer thread per port). Stop the threads in `stop`; nothing may call the host after
   `destroy` returns.
 * `changed_inputs` numbers the inputs on their own (bit i = i-th input port); every host call takes the index into the

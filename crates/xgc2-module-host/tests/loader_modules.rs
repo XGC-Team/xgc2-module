@@ -11,7 +11,7 @@ use xgc2_module_host::loader::{self, Dir, LoadError};
 fn good_descriptors_are_read_completely() {
     let path = module("consumer");
     let module = loader::load(&path, None).unwrap();
-    assert_eq!((module.name.as_str(), module.version.as_str(), module.abi_minor), ("test_consumer", "1.0.0", 0));
+    assert_eq!((module.name.as_str(), module.version.as_str(), module.abi_minor), ("test_consumer", "1.0.0", 1));
     assert_eq!(module.canonical, path.canonicalize().unwrap());
     assert_eq!(module.sha256, loader::sha256_hex(&std::fs::read(&path).unwrap()));
     assert_eq!(module.ports.len(), 2);
@@ -58,5 +58,5 @@ fn a_library_without_the_entry_point_is_refused() {
 
 #[test]
 fn the_abi_constants_match_the_header() {
-    assert_eq!((abi::ABI_MAJOR, abi::ABI_MINOR, abi::MAX_PORTS), (2, 0, 64));
+    assert_eq!((abi::ABI_MAJOR, abi::ABI_MINOR, abi::MAX_PORTS), (2, 1, 64));
 }

@@ -13,6 +13,8 @@ workers = 2                             # worker threads, default min(4, cores)
 mode = "steady"                         # "external": time comes from the channel named below
 # mode = "external"
 # channel = "clock"                     # a state channel of schema xgc2.clock.v1, written by the ROS edge
+# mode = "utc"                          # CLOCK_REALTIME: hosts with disciplined clocks share it
+# phase_t0_ns = 1760000000000000000     # origin of the timer grid (the session's T0), optional
 
 [control]
 socket = "/run/xgc2/scout1/module.sock" # XRPC http.v1; the directory must be owned by the user, mode 0700

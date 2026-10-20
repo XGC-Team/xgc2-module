@@ -1,4 +1,4 @@
-//! Rust mirror of `include/xgc2/module.h` (module ABI 2.0).
+//! Rust mirror of `include/xgc2/module.h` (module ABI 2.1).
 //!
 //! Field order and types follow the C header exactly; `tests/abi_layout.rs` compares every
 //! size and offset with a C compilation of the header. Fields a module fills in (the
@@ -8,7 +8,7 @@
 use std::ffi::{c_char, c_int, c_void};
 
 pub const ABI_MAJOR: u32 = 2;
-pub const ABI_MINOR: u32 = 0;
+pub const ABI_MINOR: u32 = 1;
 /// Name of the exported descriptor function, and the same NUL-terminated for `dlsym`.
 pub const ENTRY_NAME: &str = "xgc2_module_entry";
 pub const ENTRY_SYMBOL: &[u8] = b"xgc2_module_entry\0";
@@ -35,6 +35,8 @@ pub const STEP_INPUT: u32 = 0x1;
 pub const STEP_TIMER: u32 = 0x2;
 pub const STEP_WAKE: u32 = 0x4;
 pub const STEP_CONFIG: u32 = 0x8;
+/// Minor 1: the instant set with `wake_at_ns` was reached.
+pub const STEP_DEADLINE: u32 = 0x10;
 
 #[repr(C)]
 pub struct PortDesc {
@@ -92,6 +94,10 @@ pub struct HostApi {
     pub set_period_ns: unsafe extern "C" fn(*mut c_void, i64),
     pub log: unsafe extern "C" fn(*mut c_void, c_int, *const c_char),
     pub report: unsafe extern "C" fn(*mut c_void, c_int, *const c_char),
+    /// Minor 1.
+    pub wake_at_ns: unsafe extern "C" fn(*mut c_void, i64),
+    /// Minor 1.
+    pub phase_t0_ns: unsafe extern "C" fn(*mut c_void) -> i64,
 }
 
 /// Opaque module instance (`xgc2_instance`).

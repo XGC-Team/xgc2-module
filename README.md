@@ -40,8 +40,9 @@ rustfmt or clippy, so the minimum supported Rust version (`cargo +1.85.0 test --
 
 | Path | What |
 |---|---|
-| `include/xgc2/module.h` | The module ABI (version 2.0), a C11 and C++ header. A module is a shared library that exports `xgc2_module_entry()`. |
-| `sdk/` | CMake package `Xgc2Module` (target `Xgc2Module::SDK`) that installs the header; Debian package `libxgc2-module-dev`. |
+| `include/xgc2/module.h` | The module ABI (version 2.1), a C11 and C++ header; `include/xgc2/frame.h` is the byte frame convention for edges that cross a host. A module is a shared library that exports `xgc2_module_entry()`. |
+| `sdk/` | CMake package `Xgc2Module` (target `Xgc2Module::SDK`, version 0.3) that installs the headers, the header-only C++ module SDK (`xgc2/sdk/host.hpp`, `json_config.hpp`, `frame.hpp`, and the in-test host `test_host.hpp`) and the linker script `exports.map`; Debian package `libxgc2-module-dev`. The one copy every module of the platform builds on. |
+| `modules/` | The frame links as modules of the host: `peer_link` (UDP between hosts, bounded fragmentation) and `shm_bridge` (shared memory between the host processes of one machine), with their tests. |
 | `crates/xgc2-module-host` | The host: library and the binary `xgc2-module-host`. |
 | `tests/modules/` | Small C and C++ test modules, built by the integration tests. |
 | `docs/` | [architecture](docs/architecture.md), [manifest](docs/manifest.md), [control API](docs/control-api.md), validation records, an example manifest. |

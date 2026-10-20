@@ -24,6 +24,8 @@ static HOST_API: HostApi = HostApi {
     set_period_ns,
     log: log_message,
     report,
+    wake_at_ns,
+    phase_t0_ns,
 };
 
 pub fn host_api() -> &'static HostApi {
@@ -94,6 +96,18 @@ unsafe extern "C" fn set_period_ns(ctx: *mut c_void, period_ns: i64) {
     if let Some(instance) = unsafe { instance(ctx) } {
         instance.set_period_ns(period_ns);
     }
+}
+
+unsafe extern "C" fn wake_at_ns(ctx: *mut c_void, deadline_ns: i64) {
+    // SAFETY: see `instance`.
+    if let Some(instance) = unsafe { instance(ctx) } {
+        instance.wake_at_ns(deadline_ns);
+    }
+}
+
+unsafe extern "C" fn phase_t0_ns(ctx: *mut c_void) -> i64 {
+    // SAFETY: see `instance`.
+    unsafe { instance(ctx) }.map_or(0, |instance| instance.env().clock.phase_t0_ns())
 }
 
 /// # Safety

@@ -263,7 +263,7 @@ fn libraries_are_loaded_and_unloaded_at_runtime() {
     // The right pin works, and the library reports what it is.
     let info = f.load("consumer", &other);
     assert_eq!(info["name"], "test_consumer");
-    assert_eq!(info["abi"], "2.0");
+    assert_eq!(info["abi"], "2.1");
     assert_eq!(info["ports"].as_array().unwrap().len(), 2);
     let sha = info["sha256"].as_str().unwrap().to_owned();
     f.host.unload_module("consumer").unwrap();

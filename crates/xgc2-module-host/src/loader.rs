@@ -413,7 +413,7 @@ mod tests {
     fn rejects_bad_versions_and_tables() {
         let mut f = Fixture::new();
         assert!(parse(&mut f, 1, 0).unwrap_err().contains("ABI major 1"));
-        assert!(parse(&mut f, 2, 1).unwrap_err().contains("newer"));
+        assert!(parse(&mut f, 2, 2).unwrap_err().contains("newer"));
         let mut f = Fixture::new();
         f.port(Raw { name: "a", ..STATE_IN });
         f.port(Raw { name: "a", direction: abi::PORT_OUT, ..STATE_IN });

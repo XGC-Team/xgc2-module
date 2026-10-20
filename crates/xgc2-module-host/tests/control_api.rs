@@ -135,7 +135,7 @@ fn describe_is_the_only_unfenced_call_and_carries_identity_and_readiness() {
     assert_eq!(described["instance_id"], c.server.as_ref().unwrap().instance_id());
     assert_eq!(described["ready"], true, "an empty entity has nothing missing");
     assert_eq!(described["facts"]["entity"], "control-test");
-    assert_eq!(described["facts"]["abi"], json!({"major": 2, "minor": 0}));
+    assert_eq!(described["facts"]["abi"], json!({"major": 2, "minor": 1}));
     assert_eq!(described["facts"]["clock"]["mode"], "steady");
     // Everything else needs the instance id of this boot. A client without one is told so by
     // the server; a client pinned to another boot (a restarted host) is refused too.
@@ -320,7 +320,7 @@ fn readiness_follows_started_instances_and_their_producers() {
 #[test]
 fn describe_wait_is_released_by_the_first_external_clock_sample() {
     let c = Control::with(|options| {
-        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()) };
+        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()), phase_t0_ns: None };
     });
     c.ok("/v1/modules/load", json!({"path": c.path_of("sim_clock"), "name": "clock"}));
     c.ok(
@@ -344,7 +344,7 @@ fn describe_is_immediate_when_ready_or_without_a_wait() {
         assert_eq!(described["ready"], true);
     }
     let not_ready = Control::with(|options| {
-        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()) };
+        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()), phase_t0_ns: None };
     });
     for target in ["/v1/describe", "/v1/describe?wait_ready_ms=0"] {
         let (status, described) = not_ready.describe(target, Duration::from_secs(1)).unwrap();
@@ -356,7 +356,7 @@ fn describe_is_immediate_when_ready_or_without_a_wait() {
 #[test]
 fn describe_wait_expires_with_the_current_not_ready_body() {
     let c = Control::with(|options| {
-        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()) };
+        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()), phase_t0_ns: None };
     });
     let started = Instant::now();
     let (status, described) = c.describe("/v1/describe?wait_ready_ms=120", Duration::from_secs(2)).unwrap();
@@ -371,7 +371,7 @@ fn describe_wait_expires_with_the_current_not_ready_body() {
 #[test]
 fn describe_wait_is_bounded_by_the_request_deadline() {
     let c = Control::with(|options| {
-        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()) };
+        options.clock = ClockSpec { mode: Mode::External, channel: Some("clock".into()), phase_t0_ns: None };
     });
     let started = Instant::now();
     let response = c.describe("/v1/describe?wait_ready_ms=30000", Duration::from_millis(120));

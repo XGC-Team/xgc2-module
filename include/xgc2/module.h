@@ -1,6 +1,8 @@
 /*
  * xgc2/module.h - xgc2-module module ABI (binding contract for #226/#219).
  * ABI major 2: the successor of the sync-runtime plugin ABI 1.x (incompatible change, normal major bump).
+ * Minor 1 (append-only): wake_at_ns, phase_t0_ns, the XGC2_STEP_DEADLINE reason and the clock domain `utc`;
+ * the byte frame convention for ports that cross a host or process boundary is in xgc2/frame.h.
  *
  * A module is a shared library exporting `const xgc2_module_desc* xgc2_module_entry(void)`.
  * All descriptor strings and the port table must stay valid while the library is loaded.
@@ -18,7 +20,7 @@
  * - write_begin/write_commit/write_abort may be called from step, or from module-owned threads for
  *   output ports flagged XGC2_PORT_ASYNC_WRITER (one writer thread at a time per port).
  * - read_latest/read_next/changed are only valid inside step; views are borrowed until step returns.
- * - now_ns, wake, log, report and set_period_ns may be called from any thread.
+ * - now_ns, wake, wake_at_ns, phase_t0_ns, log, report and set_period_ns may be called from any thread.
  *
  * Port numbering: every host API call that takes `port` uses the index into the descriptor's port
  * table (inputs and outputs share one numbering). Only xgc2_step_ctx.changed_inputs numbers the
@@ -38,8 +40,23 @@
  * - Configuration is a JSON object (UTF-8 text, NUL-terminated; length excludes the NUL) passed to
  *   create and configure.
  *
+ * Time (host clock): now_ns(), step contexts and producer stamps are nanoseconds of one clock per
+ * host, chosen in the entity manifest: `steady` (CLOCK_MONOTONIC; one process only), `utc`
+ * (CLOCK_REALTIME; comparable across hosts whose clocks are disciplined, which the host does not
+ * check) or `external` (the simulation time of a designated channel). Payload times that cross a
+ * host are int64 nanoseconds of the session domain (utc or simulation time); the sample stamp is
+ * the clock reading at commit, so a received frame has its receive time as stamp and the sender's
+ * time in its payload.
+ * Timers: the period of set_period_ns expires at phase_t0_ns() + k * period when the clock has a
+ * grid (`utc`, or a manifest phase), otherwise one period after the timer was armed. wake_at_ns
+ * requests one step at an absolute instant of the host clock (XGC2_STEP_DEADLINE); it replaces
+ * the previous request of the instance, a negative instant cancels it, an instant in the past
+ * fires at the next clock reading. Neither is a hard real-time guarantee: a step runs after
+ * the instant, never before.
+ *
  * Versioning: minor versions only append to xgc2_host_api. A module may use an entry only if
- * host->abi_minor covers it, and the host refuses a module whose abi_minor exceeds its own.
+ * host->abi_minor covers it (wake_at_ns and phase_t0_ns need minor 1), and the host refuses a
+ * module whose abi_minor exceeds its own.
  */
 #ifndef XGC2_MODULE_H
 #define XGC2_MODULE_H
@@ -52,7 +69,7 @@ extern "C" {
 #endif
 
 #define XGC2_MODULE_ABI_MAJOR 2u
-#define XGC2_MODULE_ABI_MINOR 0u
+#define XGC2_MODULE_ABI_MINOR 1u
 #define XGC2_MODULE_ENTRY_SYMBOL "xgc2_module_entry"
 #define XGC2_MODULE_MAX_PORTS 64u
 
@@ -93,6 +110,7 @@ typedef struct xgc2_sample_view {
 #define XGC2_STEP_TIMER 0x2u  /* the instance period elapsed */
 #define XGC2_STEP_WAKE 0x4u   /* wake() was called */
 #define XGC2_STEP_CONFIG 0x8u /* configure() was applied since the last step */
+#define XGC2_STEP_DEADLINE 0x10u /* minor 1: the instant given to wake_at_ns was reached */
 
 typedef struct xgc2_step_ctx {
   int64_t now_ns;          /* host clock when the step started */
@@ -120,6 +138,9 @@ typedef struct xgc2_host_api {
   void (*set_period_ns)(void* host_ctx, int64_t period_ns); /* 0 disables the timer */
   void (*log)(void* host_ctx, int level, const char* message); /* 0 debug, 1 info, 2 warn, 3 error */
   void (*report)(void* host_ctx, int health, const char* detail); /* 0 ok, 1 degraded, 2 failed */
+  /* minor 1 */
+  void (*wake_at_ns)(void* host_ctx, int64_t deadline_ns); /* host clock; < 0 cancels */
+  int64_t (*phase_t0_ns)(void* host_ctx); /* origin of the timer grid, 0 when the clock has none */
 } xgc2_host_api;
 
 typedef struct xgc2_instance xgc2_instance;
