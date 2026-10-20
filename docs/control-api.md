@@ -26,7 +26,7 @@ Reads never wait for a module. Mutations are serialized: while one runs, another
 
 | Call | Answer |
 |---|---|
-| `GET /v1/describe` | `{service, api_version, instance_id, ready, facts}`. `facts`: `entity`, `host_version`, `abi`, `clock` (`mode`, `valid`, `now_ns`, `channel`), `instances` (name, module, state, health, required, affinity, worker, worker_moves, ready, missing inputs), `modules`, `not_ready` (the reasons). Needs no instance id. |
+| `GET /v1/describe` | `{service, api_version, instance_id, ready, facts}`. `facts`: `entity`, `host_version`, `abi`, `clock` (`mode`, `valid`, `now_ns`, `channel`, `phase_t0_ns`: the origin of the timer grid or null), `instances` (name, module, state, health, required, affinity, worker, worker_moves, ready, missing inputs), `modules`, `not_ready` (the reasons). Needs no instance id. |
 | `GET /v1/health` | `entity`, `uptime_ms`, `clock`, `workers` (`configured`, `live`, `abandoned`, `sticky`: sticky instance counts by slot), `instances` (state, health, affinity, worker, worker_moves, the module's `reported` detail, `last_error`, timing, `steps`, `step_time`, `handoff_latency`, `wakeups`, `input_commits`, `coalesced_dirties`, `timer_fires`, `missed_periods`, `overruns`, `step_errors`, `spurious_wakeups`, `misuse`, `ports` with their channel), `channels` (kind, schema, size, depth, readers, writers, `commits`, `drops`, `stale`, `stale_reads`, `lag`, `stalls`). |
 | `GET /v1/modules` | the loaded libraries: handle, name, version, path, sha256, ABI, ports, the instances that use them, `pinned`. |
 
