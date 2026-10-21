@@ -172,3 +172,142 @@ fn a_failing_start_exits_without_serving() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("libm.so"));
     assert!(!socket.exists());
 }
+
+fn object_keys(value: &Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    keys
+}
+
+#[test]
+fn describe_lib_prints_descriptor_facts() {
+    let path = module("consumer");
+    let output = host().arg("--describe-lib").arg(&path).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stderr.is_empty());
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        object_keys(&document),
+        ["abi_major", "abi_minor", "name", "ports", "sha256", "version"]
+    );
+    assert_eq!(document["name"], "test_consumer");
+    assert_eq!(document["version"], "1.0.0");
+    assert_eq!(document["abi_major"], 2);
+    assert_eq!(document["abi_minor"], 1);
+    let sha = xgc2_module_host::loader::sha256_hex(&std::fs::read(&path).unwrap());
+    assert_eq!(document["sha256"], sha);
+    let ports = document["ports"].as_array().unwrap();
+    assert_eq!(ports.len(), 2);
+    assert_eq!(object_keys(&ports[0]), ["align", "depth", "dir", "flags", "kind", "name", "required", "schema", "size"]);
+    assert_eq!(
+        &ports[0],
+        &serde_json::json!({"name": "state_in", "dir": "in", "kind": "state", "schema": "test.sample.v1", "required": false, "depth": 0, "size": 64, "align": 8, "flags": 0})
+    );
+    assert_eq!(
+        &ports[1],
+        &serde_json::json!({"name": "event_in", "dir": "in", "kind": "event", "schema": "test.event.v1", "required": false, "depth": 16, "size": 16, "align": 8, "flags": 0})
+    );
+
+    let passed = host().arg("--describe-lib").arg(module("passthrough")).output().unwrap();
+    assert!(passed.status.success(), "{}", String::from_utf8_lossy(&passed.stderr));
+    let passed: Value = serde_json::from_slice(&passed.stdout).unwrap();
+    assert_eq!(passed["name"], "test_passthrough");
+    assert_eq!(passed["ports"][0]["required"], true);
+    assert_eq!(passed["ports"][0]["flags"], xgc2_module_host::abi::PORT_REQUIRED);
+    assert_eq!(passed["ports"][1]["flags"], 0);
+
+    let clock = host().arg("--describe-lib").arg(module("sim_clock")).output().unwrap();
+    assert!(clock.status.success(), "{}", String::from_utf8_lossy(&clock.stderr));
+    let clock: Value = serde_json::from_slice(&clock.stdout).unwrap();
+    assert_eq!(clock["ports"][0]["dir"], "out");
+    assert_eq!(clock["ports"][0]["required"], false);
+    assert_eq!(clock["ports"][0]["schema"], "xgc2.clock.v1");
+    assert_eq!(clock["ports"][0]["size"], 8);
+    assert_eq!(clock["ports"][0]["flags"], xgc2_module_host::abi::PORT_ASYNC_WRITER);
+}
+
+#[test]
+fn describe_lib_reports_loader_errors_and_rejects_other_modes() {
+    let abi = host().arg("--describe-lib").arg(broken("ABI1")).output().unwrap();
+    assert_eq!(abi.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&abi.stderr).contains("ABI major 1"));
+
+    let missing = host().arg("--describe-lib").arg(build("layout_probe.c", "layout_probe", &[])).output().unwrap();
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("xgc2_module_entry"));
+
+    let output = host().arg("--describe-lib").output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--describe-lib needs a value"));
+
+    let dir = private_dir();
+    let sentinel = dir.path().join("sentinel");
+    let source = dir.path().join("sentinel.c");
+    std::fs::write(
+        &source,
+        r#"
+#include <stdio.h>
+#include <xgc2/module.h>
+static void mark(const char* word) {
+    FILE* file = fopen(SENTINEL, "a");
+    if (!file) return;
+    fputs(word, file);
+    fputc('\n', file);
+    fclose(file);
+}
+__attribute__((constructor)) static void on_load(void) { mark("constructor"); }
+static xgc2_status create(const xgc2_host_api* host, void* ctx, const xgc2_config* config, xgc2_instance** out) {
+    (void)host; (void)ctx; (void)config; (void)out; mark("create"); return XGC2_ERR_INTERNAL;
+}
+static xgc2_status configure(xgc2_instance* instance, const xgc2_config* config) {
+    (void)instance; (void)config; mark("configure"); return XGC2_ERR_INTERNAL;
+}
+static xgc2_status start(xgc2_instance* instance) { (void)instance; mark("start"); return XGC2_ERR_INTERNAL; }
+static xgc2_status step(xgc2_instance* instance, const xgc2_step_ctx* ctx) {
+    (void)instance; (void)ctx; mark("step"); return XGC2_ERR_INTERNAL;
+}
+static xgc2_status stop(xgc2_instance* instance) { (void)instance; mark("stop"); return XGC2_ERR_INTERNAL; }
+static void destroy(xgc2_instance* instance) { (void)instance; mark("destroy"); }
+static const xgc2_port_desc PORTS[] = {{"out", XGC2_PORT_OUT, XGC2_PORT_STATE, "xgc2.sentinel.v1", 8, 8, 0, 0}};
+static const xgc2_module_desc DESC = {XGC2_MODULE_ABI_MAJOR, XGC2_MODULE_ABI_MINOR, "describe_sentinel", "1.0.0", PORTS, 1,
+                                      create, configure, start, step, stop, destroy};
+__attribute__((visibility("default"))) const xgc2_module_desc* xgc2_module_entry(void) {
+    mark("entry");
+    return &DESC;
+}
+"#,
+    )
+    .unwrap();
+    let library = build_file(&source, "describe_sentinel", &[&format!("SENTINEL=\"{}\"", sentinel.display())], &[]);
+    let manifest = dir.path().join("unused.toml");
+    let socket = dir.path().join("unused.sock");
+    let path = library.to_str().unwrap();
+    let sentinel_text = sentinel.to_str().unwrap();
+    let manifest_text = manifest.to_str().unwrap();
+    let socket_text = socket.to_str().unwrap();
+    for args in [
+        vec!["--describe-lib", path, "--manifest", manifest_text],
+        vec!["--manifest", manifest_text, "--describe-lib", path],
+        vec!["--describe-lib", path, "--check"],
+        vec!["--check", "--describe-lib", path],
+        vec!["--describe-lib", path, "--control-socket", socket_text],
+        vec!["--control-socket", socket_text, "--describe-lib", path],
+        vec!["--describe-lib", path, "--workers", "2"],
+        vec!["--workers", "2", "--describe-lib", path],
+    ] {
+        let output = host().args(&args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?} {}", String::from_utf8_lossy(&output.stderr));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("cannot be combined"), "{args:?}: {stderr}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(!sentinel.exists(), "{args:?} loaded the library");
+    }
+
+    let output = host().arg("--describe-lib").arg(&library).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["name"], "describe_sentinel");
+    assert_eq!(document["abi_major"], xgc2_module_host::abi::ABI_MAJOR);
+    let text = std::fs::read_to_string(sentinel_text).unwrap();
+    assert_eq!(text, "constructor\nentry\n", "{text}");
+}

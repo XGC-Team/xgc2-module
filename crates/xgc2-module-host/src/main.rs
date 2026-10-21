@@ -1,20 +1,26 @@
 //! `xgc2-module-host --manifest FILE [--control-socket PATH] [--workers N] [--log-level LEVEL] [--check]`
+//! `xgc2-module-host --describe-lib PATH`
 //!
 //! Runs the modules of one entity until SIGINT or SIGTERM. With `--check` the manifest is
 //! validated (libraries are loaded and every channel is planned) and nothing is started.
-//! Exit codes: 0 clean shutdown or successful check, 2 startup or usage error.
+//! `--describe-lib` loads one library and prints its descriptor. dlopen still runs ELF
+//! constructors and `xgc2_module_entry`; the vtable lifecycle is not called.
+//! Exit codes: 0 clean shutdown, successful check, or description; 2 startup or usage error.
 
 use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use xgc2_module_host::abi;
 use xgc2_module_host::control::ControlServer;
 use xgc2_module_host::launch;
+use xgc2_module_host::loader::{self, Dir};
 use xgc2_module_host::log::{self, Level};
 use xgc2_module_host::manifest::Manifest;
 
-const USAGE: &str =
-    "usage: xgc2-module-host --manifest FILE [--control-socket PATH] [--workers N] [--log-level debug|info|warn|error] [--check]";
+const USAGE: &str = "\
+usage: xgc2-module-host --manifest FILE [--control-socket PATH] [--workers N] [--log-level debug|info|warn|error] [--check]
+       xgc2-module-host --describe-lib PATH";
 const MANIFEST_LIMIT: u64 = 1 << 20;
 
 struct Args {
@@ -22,10 +28,12 @@ struct Args {
     control_socket: Option<PathBuf>,
     workers: Option<usize>,
     check: bool,
+    describe_lib: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut manifest = None;
+    let mut describe_lib = None;
     let mut control_socket = None;
     let mut workers = None;
     let mut check = false;
@@ -34,6 +42,7 @@ fn parse_args() -> Result<Args, String> {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value\n{USAGE}"));
         match arg.as_str() {
             "--manifest" => manifest = Some(PathBuf::from(value("--manifest")?)),
+            "--describe-lib" => describe_lib = Some(PathBuf::from(value("--describe-lib")?)),
             "--control-socket" => control_socket = Some(PathBuf::from(value("--control-socket")?)),
             "--workers" => {
                 let text = value("--workers")?;
@@ -48,7 +57,52 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
         }
     }
-    Ok(Args { manifest: manifest.ok_or_else(|| format!("--manifest is required\n{USAGE}"))?, control_socket, workers, check })
+    if describe_lib.is_some() && (manifest.is_some() || control_socket.is_some() || workers.is_some() || check) {
+        return Err(format!(
+            "--describe-lib cannot be combined with --manifest, --check, --control-socket or --workers\n{USAGE}"
+        ));
+    }
+    Ok(Args {
+        manifest: match describe_lib {
+            Some(_) => PathBuf::new(),
+            None => manifest.ok_or_else(|| format!("--manifest is required\n{USAGE}"))?,
+        },
+        control_socket,
+        workers,
+        check,
+        describe_lib,
+    })
+}
+
+fn describe_lib(path: &Path) -> Result<(), String> {
+    let module = loader::load(path, None).map_err(|error| error.to_string())?;
+    let ports: Vec<_> = module.ports.iter().map(|port| {
+        let flags = u32::from(port.required) * abi::PORT_REQUIRED | u32::from(port.async_writer) * abi::PORT_ASYNC_WRITER;
+        serde_json::json!({
+            "name": port.name,
+            "dir": match port.dir {
+                Dir::In => "in",
+                Dir::Out => "out",
+            },
+            "kind": port.kind.as_str(),
+            "schema": port.payload.schema,
+            "required": port.required,
+            "depth": port.queue_depth,
+            "size": port.payload.size,
+            "align": port.payload.align,
+            "flags": flags,
+        })
+    }).collect();
+    let document = serde_json::json!({
+        "name": module.name,
+        "version": module.version,
+        "abi_major": abi::ABI_MAJOR,
+        "abi_minor": module.abi_minor,
+        "sha256": module.sha256,
+        "ports": ports,
+    });
+    println!("{}", serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?);
+    Ok(())
 }
 
 fn read_manifest(path: &PathBuf) -> Result<Manifest, String> {
@@ -86,6 +140,9 @@ fn wait_for_signal(set: &libc::sigset_t) -> i32 {
 
 fn run() -> Result<(), String> {
     let args = parse_args()?;
+    if let Some(path) = &args.describe_lib {
+        return describe_lib(path);
+    }
     let mut manifest = read_manifest(&args.manifest)?;
     if let Some(workers) = args.workers {
         manifest.host.workers = Some(workers);
