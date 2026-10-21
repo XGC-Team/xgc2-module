@@ -26,7 +26,10 @@ function(xgc2_link_module target source)
   target_link_libraries(${target} PRIVATE Xgc2Module::SDK ${JSONCPP_LIBRARIES} Threads::Threads rt)
   set_property(TARGET ${target} APPEND_STRING PROPERTY LINK_FLAGS
     " -Wl,--no-undefined -Wl,--version-script=${Xgc2Module_EXPORTS_MAP}")
-  install(TARGETS ${target} LIBRARY DESTINATION lib/xgc2/modules)
+  # One component: the host package installs these four libraries and nothing else from this
+  # project. The SDK, when pulled in as a subdirectory, keeps its own install rules and must not
+  # ride along into xgc2-module-host.
+  install(TARGETS ${target} LIBRARY DESTINATION lib/xgc2/modules COMPONENT xgc2_link_modules)
 endfunction()
 
 # The frame class (xgc2.frame2k.v1 by default) is a build option: a plan larger than 2032 bytes needs the 8k link.
@@ -36,3 +39,7 @@ target_compile_definitions(xgc2_peer_link_8k PRIVATE XGC2_LINK_FRAME_CLASS=8k)
 xgc2_link_module(xgc2_shm_bridge shm_bridge/shm_bridge.cpp)
 xgc2_link_module(xgc2_shm_bridge_8k shm_bridge/shm_bridge.cpp)
 target_compile_definitions(xgc2_shm_bridge_8k PRIVATE XGC2_LINK_FRAME_CLASS=8k)
+
+# CMake 3.10 accepts one --target. The package build uses this name for that one invocation.
+add_custom_target(xgc2_link_modules)
+add_dependencies(xgc2_link_modules xgc2_peer_link xgc2_peer_link_8k xgc2_shm_bridge xgc2_shm_bridge_8k)

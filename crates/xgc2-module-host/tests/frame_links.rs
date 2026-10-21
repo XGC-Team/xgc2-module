@@ -6,6 +6,7 @@ mod common;
 
 use common::*;
 use serde_json::Value;
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use xgc2_module_host::clock::Mode;
 use xgc2_module_host::host::{ClockSpec, InstanceSpec};
@@ -18,9 +19,11 @@ fn utc_host(entity: &str, phase_t0_ns: i64) -> Fixture {
     Fixture::with(entity, move |options| options.clock = ClockSpec { mode: Mode::Utc, channel: None, phase_t0_ns: Some(phase_t0_ns) })
 }
 
-fn agent_and_link(f: &Fixture, tag: &str, agent_config: &str, link: &str, link_config: &str) {
-    f.load("agent", &module("tro_shaped"));
-    f.load("link", &link_module(link));
+fn agent_and_link(f: &Fixture, tag: &str, agent_config: &str, agent_so: &Path, link_so: &Path, link_config: &str) {
+    // Paths are already built. Loading must not enter the compiler lock: the other
+    // link test may be compiling, and that wait would land after the shared grid starts.
+    f.load("agent", agent_so);
+    f.load("link", link_so);
     let rx = format!("{tag}_rx");
     let tx = format!("{tag}_tx");
     let stats = format!("{tag}_stats");
@@ -40,14 +43,18 @@ fn number(detail: &Value, key: &str) -> i64 {
 
 /// Run two agents for `seconds` and check what a period of the TRO method needs from the platform.
 fn exchange(link: &str, config_for: impl Fn(u16) -> String) {
+    // Compile before choosing T0. The lead below is only enough to start both hosts;
+    // a compile after T0 makes the first host emit periods the second one never sees.
+    let agent_so = module("tro_shaped");
+    let link_so = link_module(link);
     let period_ns = 100_000_000i64;
     // The grid origin: a boundary of the 100 ms period about half a second ahead, the same on both hosts.
     let phase = (utc_now_ns() / period_ns + 6) * period_ns;
     let a = utc_host("a", phase);
     let b = utc_host("b", phase);
     let agent = |id: u16| format!(r#"{{"self":{id},"peers":2,"period_ms":100,"w1_ms":20,"w2_ms":60,"solve_ms":8,"plan_bytes":1238}}"#);
-    agent_and_link(&a, "a", &agent(1), link, &config_for(1));
-    agent_and_link(&b, "b", &agent(2), link, &config_for(2));
+    agent_and_link(&a, "a", &agent(1), &agent_so, &link_so, &config_for(1));
+    agent_and_link(&b, "b", &agent(2), &agent_so, &link_so, &config_for(2));
     std::thread::sleep(Duration::from_millis(((phase - utc_now_ns()).max(0) / 1_000_000) as u64 + 3_000));
     let (da, db) = (a.detail("agent"), b.detail("agent"));
     for (name, own, other) in [("a", &da, &db), ("b", &db, &da)] {

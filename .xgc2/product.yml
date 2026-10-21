@@ -1,7 +1,7 @@
 schema: xgc2.product.v1
 id: xgc2-module
 name: XGC2 Module
-version: 0.2.0-2
+version: 0.3.0-1
 kind: toolchain-apt
 summary: Same-entity module aggregation - the module ABI SDK for module authors and the xgc2-module-host process that runs the modules of one entity.
 apt:
@@ -38,12 +38,16 @@ ownership:
   - /usr/bin/xgc2-module-host
   - /usr/share/doc/xgc2-module-host
   - /usr/share/xgc2/process-definitions/xgc2-module-host.json
+  - /usr/lib/xgc2/modules/libxgc2_peer_link.so
+  - /usr/lib/xgc2/modules/libxgc2_peer_link_8k.so
+  - /usr/lib/xgc2/modules/libxgc2_shm_bridge.so
+  - /usr/lib/xgc2/modules/libxgc2_shm_bridge_8k.so
 release:
   repository: XGC-Team/xgc2-module
   ref: main
   ci_workflow: ci.yml
   workflow: release.yml
   apt_versions:
-    bionic: 0.2.0-2~bionic
-    focal: 0.2.0-2~focal
-    noble: 0.2.0-2~noble
+    bionic: 0.3.0-1~bionic
+    focal: 0.3.0-1~focal
+    noble: 0.3.0-1~noble

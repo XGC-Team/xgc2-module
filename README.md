@@ -99,6 +99,6 @@ timers implement the describe readiness wait.
 `.xgc2/product.yml` declares the product `xgc2-module` with two Debian packages for bionic, focal and noble:
 
 * `libxgc2-module-dev` (architecture all): `/usr/include/xgc2/module.h` and the `Xgc2Module` CMake package;
-* `xgc2-module-host` (amd64, arm64): `/usr/bin/xgc2-module-host`, the documentation and the example manifest.
+* `xgc2-module-host` (amd64, arm64): `/usr/bin/xgc2-module-host`, the documentation and the example manifest. The same package installs the four frame links `/usr/lib/xgc2/modules/libxgc2_peer_link.so`, `libxgc2_peer_link_8k.so`, `libxgc2_shm_bridge.so` and `libxgc2_shm_bridge_8k.so`.
 
 `.xgc2/scripts/` builds and checks them; CI builds and tests everything on every push.
